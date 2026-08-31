@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0
+
+### Risk Of Options integration
+
+- Added one combined `ItemShareFix` Risk Of Options page containing the 27 intended ItemShareFix controls plus the 15 required original ItemShare 1.7.1 controls.
+- Upstream controls bind to the real `com.majai.itemshare` BepInEx `ConfigEntry` instances; no ItemShareFix shadow copies are created.
+- Added the approved ItemShareFix icon and a non-empty page description using an embedded runtime resource.
+- Added a single combined ItemShareFix Risk Of Options page with five tabs: Sharing, Item Tiers, Markers, Off-screen Indicators, and Marker Colors.
+- Added presentation-only PickupMode predicates: marker and Individual-only controls are disabled in Instant mode, while ShareEquipment is disabled in Individual mode. Stored values are never reset when a control becomes inactive.
+- Fixed `MarkerDetailRows` registration by using Risk Of Options `IntSliderOption` for its integer `ConfigEntry<int>`.
+- Risk Of Options remains optional and is still accessed only through reflection when present.
+
+### Public metadata
+
+- Updated release identity and manifest to `1.1.0`.
+- Replaced the public English/Russian README text with the approved concise release documentation.
+
+
 ## 1.0.0
 
 Initial public release.

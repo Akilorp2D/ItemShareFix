@@ -1,6 +1,6 @@
 {
   "name": "ItemShareFix",
-  "version_number": "1.0.0",
+  "version_number": "1.1.0",
   "website_url": "https://github.com/Akilorp2D/ItemShareFix",
   "description": "Fixes and improves ItemShare with personal pickup visibility, local markers, Support Drone/death/disconnect handling, temporary-item controls, and customizable marker UI.",
   "dependencies": [

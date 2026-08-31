@@ -110,10 +110,10 @@ namespace ItemShareFix.Core.Tests
         {
             var plugin = ReadSource("src/ItemShareFix.Plugin/ItemShareFixPlugin.cs");
             StringAssert.Contains(plugin, "public const string PluginName = \"ItemShareFix\";");
-            StringAssert.Contains(plugin, "public const string PluginVersion = \"1.0.0\";");
+            StringAssert.Contains(plugin, "public const string PluginVersion = \"1.1.0\";");
             var manifest = ReadSource("manifest.json");
             StringAssert.Contains(manifest, "\"name\": \"ItemShareFix\"");
-            StringAssert.Contains(manifest, "\"version_number\": \"1.0.0\"");
+            StringAssert.Contains(manifest, "\"version_number\": \"1.1.0\"");
         }
 
         [TestMethod]

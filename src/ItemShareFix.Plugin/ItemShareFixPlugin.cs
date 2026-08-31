@@ -13,7 +13,7 @@ namespace ItemShareFix
     {
         public const string PluginGuid = "com.itemsharefix";
         public const string PluginName = "ItemShareFix";
-        public const string PluginVersion = "1.0.0";
+        public const string PluginVersion = "1.1.0";
 
         private Harmony? _harmony;
         private PluginConfig? _config;

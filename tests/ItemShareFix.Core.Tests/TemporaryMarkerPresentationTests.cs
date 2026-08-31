@@ -473,7 +473,7 @@ namespace ItemShareFix.Core.Tests
             var config = ReadSource("src/ItemShareFix.Plugin/PluginConfig.cs");
             StringAssert.Contains(config, "ShareTemporaryItems = config.Bind(\"General\", \"ShareTemporaryItems\", false");
             StringAssert.Contains(config, "BindPresentationInvalidation(ShareTemporaryItems)");
-            Assert.AreEqual("269649CB98EF42783EAA90E236AEEAACE1FD1F2FA16BF33AEF8C2D536ACC5DB2", SourceSha256("src/ItemShareFix.Plugin/OptionalRiskOfOptionsIntegration.cs"));
+            Assert.AreEqual("A17D88D2CD14FC2FDD589C0D5D1F45F0B4921FAC059DB9F51B5AD067CEC2A9A6", SourceSha256("src/ItemShareFix.Plugin/OptionalRiskOfOptionsIntegration.cs"));
             Assert.AreEqual("EBB72984DD1888AACA01712EE98FCE639A656F0E7AAF4074A06370A14434E043", SourceSha256("src/ItemShareFix.Plugin/MarkerRiskOfOptionsLocalization.cs"));
         }
 

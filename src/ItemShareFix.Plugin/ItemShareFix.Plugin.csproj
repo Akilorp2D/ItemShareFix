@@ -19,4 +19,7 @@
     <Reference Include="Unity.TextMeshPro"><HintPath>$(ManagedDir)/Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="com.unity.multiplayer-hlapi.Runtime"><HintPath>$(ManagedDir)/com.unity.multiplayer-hlapi.Runtime.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources/ItemShareFixIcon.png" LogicalName="ItemShareFix.Resources.ItemShareFixIcon.png" />
+  </ItemGroup>
 </Project>

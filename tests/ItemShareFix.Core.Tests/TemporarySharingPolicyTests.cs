@@ -65,13 +65,13 @@ namespace ItemShareFix.Core.Tests
         public void ISF_R1_C21_A1_04_RiskOfOptionsUsesCanonicalShareTemporaryConfigEntry()
         {
             var source = Plugin("OptionalRiskOfOptionsIntegration.cs");
-            StringAssert.Contains(source, "config.ShareTemporaryItems, log");
+            StringAssert.Contains(source, "config.ShareTemporaryItems, null, out failure");
             Assert.IsFalse(source.Contains("ShareTemporaryItemsMirror"));
         }
 
         [TestMethod]
         public void ISF_R1_C21_A1_05_RiskOfOptionsShareTemporaryIsCheckBoxOption()
-            => StringAssert.Contains(Plugin("OptionalRiskOfOptionsIntegration.cs"), "\"RiskOfOptions.Options.CheckBoxOption\", config.ShareTemporaryItems, log");
+            => StringAssert.Contains(Plugin("OptionalRiskOfOptionsIntegration.cs"), "\"RiskOfOptions.Options.CheckBoxOption\", config.ShareTemporaryItems, null, out failure");
 
         [TestMethod]
         public void ISF_R1_C21_A1_06_RiskOfOptionsVisibleOptionCountIsTwentySeven()
@@ -275,20 +275,21 @@ namespace ItemShareFix.Core.Tests
                 ["src/ItemShareFix.Core/TemporarySharingPolicy.cs"] = "E9540487B1901827E3012AE5D7BA3A2C9C4C110EA97010245D4E54D236A85145",
                 ["src/ItemShareFix.Plugin/ClientPresentation.cs"] = "29067DD6154199D4E9EA213FC3A8835CAFC73420FB4E88E6E9E17D4D38B57D79",
                 ["src/ItemShareFix.Plugin/CompatibilityGuard.cs"] = "C2B71BED8EEE689DAD4AE54EE0880527DBBC7A8F9F1C2ED8F2968BEE21F8DDB1",
-                ["src/ItemShareFix.Plugin/ItemShareFix.Plugin.csproj"] = "B4A688418740D84D01FA23FB3D8AE410B4B965689C7FFD46F19043C81860781D",
-                ["src/ItemShareFix.Plugin/ItemShareFixPlugin.cs"] = "85F1019CAF871DA0C7E466D23994030C6C2F138CCEF2E4398A6B735081DF010B",
+                ["src/ItemShareFix.Plugin/ItemShareFix.Plugin.csproj"] = "363B261D2EF267E0396526D2370E26FCE90A096A3BCDFEF1EBD6C5F1849B996C",
+                ["src/ItemShareFix.Plugin/ItemShareFixPlugin.cs"] = "EC8CA33EC540D2D5BB5604ABDC75AD837D6B5F8F6172ED5B0BB43030EC71D4D0",
                 ["src/ItemShareFix.Plugin/LocalHudPresentationProbe.cs"] = "71F8A4B66532A542D153870770F9E9B40CA7EB8DBE387A282E9C066DEB7D28FE",
                 ["src/ItemShareFix.Plugin/MarkerRiskOfOptionsLocalization.cs"] = "EBB72984DD1888AACA01712EE98FCE639A656F0E7AAF4074A06370A14434E043",
                 ["src/ItemShareFix.Plugin/NativeHudMarkerRenderer.cs"] = "C3263B539FED87B3356FCFA8A80DA525707E95583BCA201A6B4CEAC9DD463AB1",
-                ["src/ItemShareFix.Plugin/OptionalRiskOfOptionsIntegration.cs"] = "269649CB98EF42783EAA90E236AEEAACE1FD1F2FA16BF33AEF8C2D536ACC5DB2",
+                ["src/ItemShareFix.Plugin/OptionalRiskOfOptionsIntegration.cs"] = "A17D88D2CD14FC2FDD589C0D5D1F45F0B4921FAC059DB9F51B5AD067CEC2A9A6",
                 ["src/ItemShareFix.Plugin/ParticipantRuntime.cs"] = "4570B1E44C5A02AC8F71296D5A40477C6503D45D64B4786162BE15047C69F9BE",
                 ["src/ItemShareFix.Plugin/PluginConfig.cs"] = "F2C84981657F460B6DAC42644176023E66A8E0F2FD0B724B447897F0C2BCEF54",
+                ["src/ItemShareFix.Plugin/Resources/ItemShareFixIcon.png"] = "F77ECBAF5D3C37411E536E8D0DDEB2D9385E04F5C1D678C0DD63AFF1F0D1ED1C",
                 ["src/ItemShareFix.Plugin/RuntimePatches.cs"] = "AD4D04D530B3D7F14CE84D03C8D67ACACBA29D6E09E835608A49B9D262D6A506",
                 ["src/ItemShareFix.Plugin/ServerCoordinator.cs"] = "3EC43F2BFA9354D05F60F85164581C0E39C2AFAD4067049D5339ECF5E608BA23",
                 ["src/ItemShareFix.Plugin/UpstreamBridge.cs"] = "43935D44596A14C91FAAF276357DD7CBBF5B226330835BE6BCF265B9531AD4A9",
             };
 
-            Assert.AreEqual(45, expectedProductionHashes.Count, "A2 release production freeze map must contain exactly 45 paths.");
+            Assert.AreEqual(46, expectedProductionHashes.Count, "1.1.0 authorized production freeze map must contain exactly 46 paths.");
 
             foreach (var pair in expectedProductionHashes)
                 Assert.AreEqual(pair.Value, SourceSha256(pair.Key), "A2 release production hash drift: " + pair.Key);

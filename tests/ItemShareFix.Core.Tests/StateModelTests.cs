@@ -4409,15 +4409,15 @@ namespace ItemShareFix.Core.Tests
         {
             var source = R24ReadPluginSource("OptionalRiskOfOptionsIntegration.cs");
             StringAssert.Contains(source, "public const int CurrentMarkerOptionCount = 27;");
-            StringAssert.Contains(source, "registered=0/\" + CurrentMarkerOptionCount");
+            StringAssert.Contains(source, "public const int ItemShareFixOptionCount = CurrentMarkerOptionCount;");
         }
 
         [TestMethod]
         public void ISF_R1_C20_R11_R4C2_C4C7_03_MasterToggleIsFirstCanonicalCheckBoxBeforePresentationMode()
         {
             var source = R24ReadPluginSource("OptionalRiskOfOptionsIntegration.cs");
-            var master = source.IndexOf("RegisterOption(assembly, manager, \"RiskOfOptions.Options.CheckBoxOption\", config.PersonalMarkersEnabled, log)", StringComparison.Ordinal);
-            var mode = source.IndexOf("RegisterOption(assembly, manager, \"RiskOfOptions.Options.ChoiceOption\", config.MarkerPresentationMode, log)", StringComparison.Ordinal);
+            var master = source.IndexOf("AddLocalPlan(assembly, plans, \"RiskOfOptions.Options.CheckBoxOption\", config.PersonalMarkersEnabled, instantMode", StringComparison.Ordinal);
+            var mode = source.IndexOf("AddLocalPlan(assembly, plans, \"RiskOfOptions.Options.ChoiceOption\", config.MarkerPresentationMode, instantMode", StringComparison.Ordinal);
             Assert.IsTrue(master >= 0);
             Assert.IsTrue(mode > master);
         }
@@ -4428,7 +4428,7 @@ namespace ItemShareFix.Core.Tests
             var config = R24ReadPluginSource("PluginConfig.cs");
             var rto = R24ReadPluginSource("OptionalRiskOfOptionsIntegration.cs");
             StringAssert.Contains(config, "public ConfigEntry<bool> PersonalMarkersEnabled { get; }");
-            StringAssert.Contains(rto, "config.PersonalMarkersEnabled, log");
+            StringAssert.Contains(rto, "config.PersonalMarkersEnabled, instantMode, out failure");
             Assert.IsFalse(rto.Contains("new ConfigEntry"));
             Assert.IsFalse(rto.Contains("PersonalMarkersEnabledMirror"));
         }
@@ -4534,7 +4534,7 @@ namespace ItemShareFix.Core.Tests
             var last = -1;
             foreach (var field in fields)
             {
-                var index = source.IndexOf("config." + field + ", log", StringComparison.Ordinal);
+                var index = source.IndexOf("config." + field, StringComparison.Ordinal);
                 Assert.IsTrue(index > last, "Registration order mismatch at " + field);
                 last = index;
             }
