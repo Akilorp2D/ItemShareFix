@@ -1,0 +1,11 @@
+{
+  "name": "ItemShareFix",
+  "version_number": "1.0.0",
+  "website_url": "",
+  "description": "Fixes and improves ItemShare with personal pickup visibility, local markers, Support Drone/death/disconnect handling, temporary-item controls, and customizable marker UI.",
+  "dependencies": [
+    "bbepis-BepInExPack-5.4.2121",
+    "Vibecodeguy-PickupShareApi-1.0.0",
+    "Vibecodeguy-ItemShare-1.7.1"
+  ]
+}
