@@ -29,6 +29,16 @@ It fixes several ItemShare issues, adds personal pickup markers, improves sharin
 **Optional:**
 - Risk Of Options — for convenient in-game configuration of ItemShare and ItemShareFix.
 
+## AI Assistance
+
+This project was created with the assistance of **ChatGPT by OpenAI**. ChatGPT was used during development for code generation and refactoring, problem analysis, documentation, and review of changes.
+
+Released versions of the mod were built, automatically tested, and manually validated before publication.
+
+## Links
+
+- **Thunderstore:** https://thunderstore.io/c/riskofrain2/p/Akilorp2D/ItemShareFix/
+
 ## License
 
 ItemShareFix is distributed under the **MIT License**.
