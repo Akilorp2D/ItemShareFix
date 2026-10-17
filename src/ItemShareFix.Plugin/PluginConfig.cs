@@ -86,8 +86,16 @@ namespace ItemShareFix
         {
             Enabled = config.Bind("General", "Enabled", true, "Master switch for ItemShareFix.");
             ShareTemporaryItems = config.Bind("General", "ShareTemporaryItems", false, "Share temporary item pickups through ItemShare. Fresh configs default to disabled; existing saved values are preserved. Disable this to give temporary pickups vanilla first-come-first-served behavior instead of ItemShare distribution.");
+            ShareHallowedItems = config.Bind("DLC Sharing", "ShareHallowedItems", false, "Share Hallowed items through ItemShare. Changes apply immediately to untouched pickups; started shared pickups retain their claims.");
+            ShareHexItems = config.Bind("DLC Sharing", "ShareHexItems", false, "Share harmful Hex items through ItemShare. Changes apply immediately to untouched pickups; started shared pickups retain their claims.");
+            ShareNTormatPages = config.Bind("DLC Sharing", "ShareNTormatPages", false, "Share active N'Tormat spell Pages through ItemShare. Changes apply immediately to untouched pickups; consumed, hidden, and progression helper items remain excluded.");
             PersonalPickupVisibilityRepairEnabled = config.Bind("General", "PersonalPickupVisibilityRepairEnabled", true, "Repair ItemShare 1.7.1 personal ordinary-pickup visibility. The upstream HideCollectedOrbs preference is still respected.");
             PersonalMarkersEnabled = config.Bind("General", "PersonalMarkersEnabled", true, "Draw local-only automatic markers for shared ordinary pickups and Artifact of Command choices still pending for a local participant.");
+            HideMarkersInTrials = config.Bind("Markers", "HideMarkersInTrials", true, "Hide ItemShareFix markers in DLC4 gong trials. Sharing and personal pickup visibility are unchanged. Applies during the current run.");
+            AutomaticMarkerDeclutter = config.Bind("Markers", "AutomaticMarkerDeclutter", true, "Group crowded on-screen markers and collapse them to category counts. Focus or approach a group to reveal details. Presentation only; applies immediately.");
+            MaxVisibleMarkerCards = config.Bind("Markers", "MaxVisibleMarkerCards", MarkerScreenDeclutterTracker.DefaultCardLimit,
+                new ConfigDescription("Maximum on-screen group cards while automatic decluttering is active. Off-screen directional summaries are separate.",
+                    new AcceptableValueRange<int>(MarkerScreenDeclutterTracker.MinimumCardLimit, MarkerScreenDeclutterTracker.MaximumCardLimit)));
             DeadPlayerDeferredItemsEnabled = config.Bind("General", "DeadPlayerDeferredItemsEnabled", true, "FULLY_DEAD participants do not receive ItemShare's immediate ShareToDead grant; their entitlement is deferred to the next safe restored-player point.");
             DisconnectCleanupEnabled = config.Bind("General", "DisconnectCleanupEnabled", true, "Cancel ItemShareFix pending/deferred state when a participant disconnects and prevent absence catch-up.");
 
@@ -155,7 +163,13 @@ namespace ItemShareFix
             OffscreenIndicatorColor = config.Bind("Marker Colors", "OffscreenIndicator", DefaultOffscreenColor, "Independent off-screen directional indicator color.");
 
             BindPresentationInvalidation(ShareTemporaryItems);
+            BindPresentationInvalidation(ShareHallowedItems);
+            BindPresentationInvalidation(ShareHexItems);
+            BindPresentationInvalidation(ShareNTormatPages);
             BindPresentationInvalidation(PersonalMarkersEnabled);
+            BindPresentationInvalidation(HideMarkersInTrials);
+            BindPresentationInvalidation(AutomaticMarkerDeclutter);
+            BindPresentationInvalidation(MaxVisibleMarkerCards);
             BindPresentationInvalidation(MarkerPresentationMode);
             BindPresentationInvalidation(ShowMarkerDistance);
             BindPresentationInvalidation(MarkerScale);
@@ -188,15 +202,21 @@ namespace ItemShareFix
             DiagnosticLogLevel = config.Bind("Diagnostics", "DiagnosticLogLevel", "Info", "Diagnostic level: Error, Warning, Info, Debug.");
             PresentationSweepSeconds = config.Bind("Diagnostics", "PresentationSweepSeconds", 0.20f, "Bounded ItemShareFix presentation refresh interval. Not a whole-scene scan; only RoR2 InstanceTracker pickups are inspected.");
             ParticipantSweepSeconds = config.Bind("Diagnostics", "ParticipantSweepSeconds", 0.25f, "Server participant-state refresh interval.");
-            RemoteOperationGraceSeconds = config.Bind("Diagnostics", "RemoteOperationGraceSeconds", 2.0f, "Reserved compatibility setting. Support Drone state uses exact CharacterMaster.GetInRemoteOp(); no heuristic grace is used.");
+            RemoteOperationGraceSeconds = config.Bind("Diagnostics", "RemoteOperationGraceSeconds", 2.0f, "Reserved compatibility setting; no gameplay effect. Support Drone state uses the exact RemoteOperation body-handling preset; no heuristic grace is used.");
         }
 
         public event EventHandler? MarkerPresentationSettingChanged;
 
         public ConfigEntry<bool> Enabled { get; }
         public ConfigEntry<bool> ShareTemporaryItems { get; }
+        public ConfigEntry<bool> ShareHallowedItems { get; }
+        public ConfigEntry<bool> ShareHexItems { get; }
+        public ConfigEntry<bool> ShareNTormatPages { get; }
         public ConfigEntry<bool> PersonalPickupVisibilityRepairEnabled { get; }
         public ConfigEntry<bool> PersonalMarkersEnabled { get; }
+        public ConfigEntry<bool> HideMarkersInTrials { get; }
+        public ConfigEntry<bool> AutomaticMarkerDeclutter { get; }
+        public ConfigEntry<int> MaxVisibleMarkerCards { get; }
         public ConfigEntry<bool> DeadPlayerDeferredItemsEnabled { get; }
         public ConfigEntry<bool> DisconnectCleanupEnabled { get; }
 
@@ -233,6 +253,8 @@ namespace ItemShareFix
         public ConfigEntry<float> PresentationSweepSeconds { get; }
         public ConfigEntry<float> ParticipantSweepSeconds { get; }
         public ConfigEntry<float> RemoteOperationGraceSeconds { get; }
+
+        public bool DiagnosticInfoEnabled => DiagnosticPolicy.Allows(DiagnosticLogging.Value, DiagnosticLogLevel.Value, DiagnosticSeverity.Info);
 
         public MarkerPresentationSettings MarkerSettingsSnapshot()
             => new MarkerPresentationSettings(

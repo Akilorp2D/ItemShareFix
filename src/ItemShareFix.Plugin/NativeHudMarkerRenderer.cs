@@ -293,11 +293,13 @@ namespace ItemShareFix
             public List<LifetimeIndicatorView> RowLifetimeIndicators { get; } = new List<LifetimeIndicatorView>(MarkerClusterPresentationPolicy.MarkerDetailRowsMax);
             public LifetimeIndicatorView? SummaryLifetimeIndicator { get; set; }
             public bool HasMeasurement { get; set; }
+            public MarkerRenderedTextCache RenderedTextCache { get; } = new MarkerRenderedTextCache();
             public MarkerMeasurementCacheKey MeasurementKey { get; set; }
             public VisualMeasurement CachedMeasurement { get; set; }
             public int AppliedTypographyRevision { get; set; } = int.MinValue;
             public int AppliedFontSize { get; set; } = -1;
             public bool MeasurementFallbackLogged { get; set; }
+            public bool InitialPreferredMeasurementDeferred { get; set; }
             public int LastMeasuredCompactBadgeCount { get; set; } = -1;
             public int LastMeasuredDetailedRowDiamondCount { get; set; } = -1;
             public int LastMeasuredLifetimeLayoutSignature { get; set; } = int.MinValue;
@@ -397,6 +399,10 @@ namespace ItemShareFix
         private readonly MarkerRuntimePerformanceCounters _performance;
         private readonly MarkerWorldClusterTracker _semanticTracker = new MarkerWorldClusterTracker();
         private readonly MarkerDenseAreaSummaryTracker _denseTracker = new MarkerDenseAreaSummaryTracker();
+        private readonly MarkerScreenDeclutterTracker _screenTracker = new MarkerScreenDeclutterTracker();
+        private readonly List<MarkerScreenCandidate> _screenCandidates = new List<MarkerScreenCandidate>(MarkerPresentationPolicy.MaxLogicalMarkers);
+        private readonly List<MarkerDenseAreaPresentationNode> _worldPresentationNodes = new List<MarkerDenseAreaPresentationNode>(MarkerPresentationPolicy.MaxLogicalMarkers);
+        private readonly List<MarkerDenseAreaPresentationNode> _screenNodeBuffer = new List<MarkerDenseAreaPresentationNode>(MarkerPresentationPolicy.MaxLogicalMarkers);
         private readonly MarkerFovPresentationHysteresisPolicy _fovTracker = new MarkerFovPresentationHysteresisPolicy();
         private readonly MarkerAdaptiveLodTracker _lodTracker = new MarkerAdaptiveLodTracker();
         private readonly Dictionary<long, MarkerRenderInput> _inputByStableKey = new Dictionary<long, MarkerRenderInput>(MarkerPresentationPolicy.MaxLogicalMarkers);
@@ -420,7 +426,6 @@ namespace ItemShareFix
         private Canvas? _canvas;
         private RectTransform? _canvasRect;
         private TMP_FontAsset? _nativeFont;
-        private Material? _nativeFontMaterial;
         private bool _typographyResolved;
         private int _typographyRevision;
         private bool _indicatorSourceLogged;
@@ -428,6 +433,12 @@ namespace ItemShareFix
         private bool _placementCacheValid;
         private int _cachedScreenWidth = -1;
         private int _cachedScreenHeight = -1;
+        private int _c2DiagnosticMarkerInputCount = -1;
+        private readonly bool _isolatedColdPrimer;
+        private bool _loadingNestedPrimerAttempted;
+        private bool _loadingNestedPrimerCompleted;
+        private bool _teardownOwnershipEvidenceLogged;
+        private int _tmpOwnedOnDisableEvidenceCount;
         private float _nextMultiMarkerMotionSolve;
         private double _nextSemanticSolveAt;
         private bool _hasSemanticInputSignature;
@@ -453,10 +464,125 @@ namespace ItemShareFix
             PluginConfig.DefaultNeutralColor,
             PluginConfig.DefaultOffscreenColor);
 
-        public NativeHudMarkerRenderer(ManualLogSource log, MarkerRuntimePerformanceCounters performance)
+        private readonly PluginConfig? _diagnosticConfig;
+        private bool DiagnosticInfoEnabled => _diagnosticConfig == null || _diagnosticConfig.DiagnosticInfoEnabled;
+        private void LogDiagnosticInfo(string message)
+        {
+            if (DiagnosticInfoEnabled) _log.LogInfo(message);
+        }
+
+        public NativeHudMarkerRenderer(ManualLogSource log, MarkerRuntimePerformanceCounters performance, PluginConfig? diagnosticConfig = null)
+            : this(log, performance, isolatedColdPrimer: false, diagnosticConfig: diagnosticConfig)
+        {
+        }
+
+        private NativeHudMarkerRenderer(ManualLogSource log, MarkerRuntimePerformanceCounters performance, bool isolatedColdPrimer, PluginConfig? diagnosticConfig = null)
         {
             _log = log;
+            _diagnosticConfig = diagnosticConfig;
             _performance = performance ?? throw new ArgumentNullException(nameof(performance));
+            _isolatedColdPrimer = isolatedColdPrimer;
+            if (_isolatedColdPrimer) _typographyResolved = true;
+        }
+
+        /// <summary>
+        /// Performs the scene-wide TMP source discovery only during plugin initialization. Interactive marker/warmup
+        /// frames never execute Resources.FindObjectsOfTypeAll for typography.
+        /// </summary>
+        public void PrimeNativeTypographyDuringInitialization()
+        {
+            if (_isolatedColdPrimer || _typographyResolved) return;
+            ResolveNativeTypography();
+        }
+
+        /// <summary>
+        /// Executes the exact nested semantic/layout/view pipeline on an isolated invisible renderer while the plugin
+        /// is still initializing. No ItemShare claim, inventory, network or live pickup state is reachable from this
+        /// path. The primer never creates, caches, mutates or retains a live MarkerView.
+        /// </summary>
+        public bool PrimeNestedColdPathDuringInitialization()
+        {
+            if (_loadingNestedPrimerAttempted) return _loadingNestedPrimerCompleted;
+            _loadingNestedPrimerAttempted = true;
+            if (_isolatedColdPrimer || Screen.width <= 0 || Screen.height <= 0) return false;
+
+            var timing = C2HitchDiagnostics.Begin(C2HitchPhase.LoadingNestedPrimer, markerCount: 0);
+            GameObject? cameraObject = null;
+            NativeHudMarkerRenderer? scratch = null;
+            C2HitchDiagnostics.SetCaptureSuppressed(true);
+            try
+            {
+                cameraObject = new GameObject("ISF.ColdPrimer.Camera", typeof(Camera));
+                cameraObject.hideFlags = HideFlags.HideAndDontSave;
+                var camera = cameraObject.GetComponent<Camera>();
+                camera.enabled = false;
+                camera.transform.position = Vector3.zero;
+                camera.transform.rotation = Quaternion.identity;
+                camera.fieldOfView = 60f;
+                camera.nearClipPlane = 0.01f;
+                camera.farClipPlane = 1000f;
+
+                scratch = new NativeHudMarkerRenderer(_log, new MarkerRuntimePerformanceCounters(), isolatedColdPrimer: true, diagnosticConfig: _diagnosticConfig);
+                var scratchInputs = new List<MarkerRenderInput>(2)
+                {
+                    new MarkerRenderInput(
+                        new PersonalMarkerIdentity(PersonalMarkerKind.OrdinaryPickup, int.MinValue + 101),
+                        new Vector3(0f, 0f, 12f),
+                        12,
+                        "Pickup",
+                        "ISF_PRIMER_A",
+                        "WHITE",
+                        MarkerClassKind.Tier1,
+                        Color.white),
+                };
+
+                // First execute the exact one-marker path, then the two-cluster transition path. Both render under an
+                // inactive scratch canvas and are destroyed before gameplay can observe them.
+                scratch.Render(camera, scratchInputs, _presentationSettings, _visualSettings, MarkerLanguage.English, _ => { });
+                scratchInputs.Add(new MarkerRenderInput(
+                    new PersonalMarkerIdentity(PersonalMarkerKind.OrdinaryPickup, int.MinValue + 102),
+                    new Vector3(9f, 0f, 14f),
+                    17,
+                    "Pickup",
+                    "ISF_PRIMER_B",
+                    "GREEN",
+                    MarkerClassKind.Tier2,
+                    Color.white));
+                scratch.Render(camera, scratchInputs, _presentationSettings, _visualSettings, MarkerLanguage.English, _ => { });
+                _loadingNestedPrimerCompleted = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _loadingNestedPrimerCompleted = false;
+                _log.LogWarning("[ItemShareFix] isolated first-marker nested cold-path primer unavailable; live semantics unchanged: " + ex.GetType().Name);
+                return false;
+            }
+            finally
+            {
+                try { scratch?.Dispose(); } catch { }
+                if (cameraObject != null) UnityEngine.Object.Destroy(cameraObject);
+                C2HitchDiagnostics.SetCaptureSuppressed(false);
+                C2HitchDiagnostics.End(timing, markerCount: 0);
+            }
+        }
+
+        /// <summary>
+        /// The release warmup now performs only bounded live-renderer prerequisites. The expensive nested first-use
+        /// path is executed during plugin initialization by PrimeNestedColdPathDuringInitialization, not by
+        /// reflection-only method preparation or a monolithic interactive-stage prewarm.
+        /// </summary>
+        public bool WarmColdPathStep()
+        {
+            if (Screen.width <= 0 || Screen.height <= 0) return false;
+            if (_canvasObject == null || _canvas == null || _canvasRect == null)
+            {
+                EnsureCanvas();
+                return false;
+            }
+            if (!_typographyResolved)
+                ResolveFallbackTypographyWithoutGlobalDiscovery();
+            return true;
         }
 
         public void InvalidatePresentationSettings(MarkerPresentationSettings settings, MarkerVisualConfigSnapshot visualSettings)
@@ -467,11 +593,12 @@ namespace ItemShareFix
             foreach (var view in _views.Values)
             {
                 view.HasMeasurement = false;
+                view.RenderedTextCache.Clear();
                 view.HasLayout = false;
                 view.HasPresentationPlan = false;
                 view.DiagnosticDirty = true;
             }
-            _log.LogInfo("ISF_MARKER_PRESENTATION_CONFIG mode=" + settings.Mode
+            LogDiagnosticInfo("ISF_MARKER_PRESENTATION_CONFIG mode=" + settings.Mode
                 + " distance=" + settings.ShowDistance
                 + " scale=" + settings.Scale.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
                 + " detailRows=" + settings.DetailRows
@@ -503,10 +630,19 @@ namespace ItemShareFix
                 return;
             }
 
+            _c2DiagnosticMarkerInputCount = inputs.Count;
+            C2HitchToken c2Timing = default;
+            if (inputs.Count > 0)
+            {
+                C2HitchDiagnostics.MarkFirstMarkerFrame();
+                c2Timing = C2HitchDiagnostics.Begin(C2HitchPhase.NativeMarkerRender, markerCount: inputs.Count);
+            }
+            try
+            {
             EnsureCanvas();
             if (_canvas == null || _canvasRect == null) return;
-            if (!_canvas.enabled) _canvas.enabled = true;
-            if (!_typographyResolved) ResolveNativeTypography();
+            if (!_canvas.enabled && !_isolatedColdPrimer) _canvas.enabled = true;
+            if (!_typographyResolved) ResolveFallbackTypographyWithoutGlobalDiscovery();
 
             if (!SettingsEqual(_presentationSettings, settings) || !VisualSettingsEqual(_visualSettings, visualSettings))
                 InvalidatePresentationSettings(settings, visualSettings);
@@ -521,6 +657,14 @@ namespace ItemShareFix
             var hudChanged = DynamicHudZonesChanged(dynamicHudZones);
             if (hudChanged) _placementCacheValid = false;
 
+            var now = (double)Time.unscaledTime;
+            var structuralMembershipInputChanged = false;
+            var denseMembershipChanged = false;
+            long? expandedKey = null;
+            var c2SemanticTiming = C2HitchDiagnostics.Begin(C2HitchPhase.NativeSemanticBuild, markerCount: inputs.Count);
+            try
+            {
+            var c2SemanticIndexTiming = C2HitchDiagnostics.Begin(C2HitchPhase.SemanticSignatureIndex, markerCount: inputs.Count);
             _inputByStableKey.Clear();
             var signature = ComputeSemanticInputSignature(inputs);
             for (var i = 0; i < inputs.Count && i < MarkerPresentationPolicy.MaxLogicalMarkers; i++)
@@ -529,16 +673,23 @@ namespace ItemShareFix
                 if (!IsFinite(input.WorldPosition.x) || !IsFinite(input.WorldPosition.y) || !IsFinite(input.WorldPosition.z)) continue;
                 _inputByStableKey[input.StableKey] = input;
             }
+            C2HitchDiagnostics.End(c2SemanticIndexTiming, markerCount: inputs.Count);
 
-            var now = (double)Time.unscaledTime;
-            var structuralMembershipInputChanged = !_hasSemanticInputSignature || signature != _semanticInputSignature;
+            structuralMembershipInputChanged = !_hasSemanticInputSignature || signature != _semanticInputSignature;
             var semanticDue = structuralMembershipInputChanged || now >= _nextSemanticSolveAt || _semanticTracker.Clusters.Count == 0;
-            var denseMembershipChanged = false;
             if (semanticDue)
             {
+                var c2WorldMembersTiming = C2HitchDiagnostics.Begin(C2HitchPhase.SemanticBuildWorldMembers, markerCount: inputs.Count);
                 BuildWorldMembers(language);
+                C2HitchDiagnostics.End(c2WorldMembersTiming, markerCount: inputs.Count);
+
+                var c2TrackerTiming = C2HitchDiagnostics.Begin(C2HitchPhase.SemanticTrackerUpdate, markerCount: inputs.Count);
                 var update = _semanticTracker.Update(_worldMembers, now);
+                C2HitchDiagnostics.End(c2TrackerTiming, markerCount: inputs.Count);
+
+                var c2DenseTiming = C2HitchDiagnostics.Begin(C2HitchPhase.SemanticDenseTrackerUpdate, markerCount: inputs.Count);
                 var denseUpdate = _denseTracker.Update(_semanticTracker.Clusters, now);
+                C2HitchDiagnostics.End(c2DenseTiming, markerCount: inputs.Count);
                 denseMembershipChanged = denseUpdate.MembershipChanged;
                 _semanticInputSignature = signature;
                 _hasSemanticInputSignature = true;
@@ -548,10 +699,24 @@ namespace ItemShareFix
                 if (update.MembershipChanged || denseMembershipChanged || structuralMembershipInputChanged) _placementCacheValid = false;
             }
 
+            var c2ClassificationTiming = C2HitchDiagnostics.Begin(C2HitchPhase.SemanticClassification, markerCount: inputs.Count);
             ClassifyPresentationNodes(camera);
-            BuildExpansionCandidates(camera);
-            var expandedKey = _lodTracker.Update(_expansionCandidates, now);
+            BuildScreenPresentationNodes(camera, semanticDue);
+            C2HitchDiagnostics.End(c2ClassificationTiming, markerCount: inputs.Count);
 
+            var c2ExpansionTiming = C2HitchDiagnostics.Begin(C2HitchPhase.SemanticExpansionLod, markerCount: inputs.Count);
+            BuildExpansionCandidates(camera);
+            expandedKey = _lodTracker.Update(_expansionCandidates, now);
+            C2HitchDiagnostics.End(c2ExpansionTiming, markerCount: inputs.Count);
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2SemanticTiming, markerCount: inputs.Count);
+            }
+
+            var c2LayoutTiming = C2HitchDiagnostics.Begin(C2HitchPhase.NativeLayoutSolve, markerCount: inputs.Count);
+            try
+            {
             _clusterFrames.Clear();
             _placementCandidates.Clear();
             _placementByKey.Clear();
@@ -559,13 +724,15 @@ namespace ItemShareFix
             var structuralInvalidated = screenChanged || hudChanged || structuralMembershipInputChanged || denseMembershipChanged;
             var projectionInvalidated = false;
 
-            var nodes = _denseTracker.Nodes;
+            var nodes = _worldPresentationNodes;
             for (var i = 0; i < nodes.Count; i++)
             {
                 var node = nodes[i];
                 if (!_activeWorldPresentationKeys.Contains(node.StableKey)) continue;
-                if (!TryBuildCurrentClusterFrame(camera, node, expandedKey.HasValue && expandedKey.Value == node.StableKey, language, out var frame))
-                    continue;
+                var c2ClusterFrameTiming = C2HitchDiagnostics.Begin(C2HitchPhase.LayoutClusterFrameBuild, markerCount: inputs.Count);
+                var frameBuilt = TryBuildCurrentClusterFrame(camera, node, expandedKey.HasValue && expandedKey.Value == node.StableKey, language, out var frame);
+                C2HitchDiagnostics.End(c2ClusterFrameTiming, markerCount: inputs.Count);
+                if (!frameBuilt) continue;
 
                 if (frame.Measurement.MeasurementChanged) structuralInvalidated = true;
                 if (!frame.View.HasSolvedProjection || MarkerFramePipelinePolicy.ProjectionMateriallyChanged(frame.View.LastSolvedProjection, frame.Projection))
@@ -578,13 +745,17 @@ namespace ItemShareFix
                 }
 
                 _clusterFrames.Add(frame);
+                var c2PlacementCandidateTiming = C2HitchDiagnostics.Begin(C2HitchPhase.LayoutPlacementCandidateBuild, markerCount: inputs.Count);
                 _placementCandidates.Add(new MarkerHudPlacementCandidate(frame.PresentationKey, frame.Projection, frame.Measurement.Footprint));
                 _activeClusterKeys.Add(frame.PresentationKey);
+                C2HitchDiagnostics.End(c2PlacementCandidateTiming, markerCount: inputs.Count);
             }
 
             if (_visualSettings.OffscreenEnabled && _directionalInputs.Count > 0)
             {
+                var c2DirectionalTiming = C2HitchDiagnostics.Begin(C2HitchPhase.LayoutDirectionalAggregation, markerCount: inputs.Count);
                 var sectors = MarkerDirectionalAggregationPolicy.Aggregate(_directionalInputs);
+                C2HitchDiagnostics.End(c2DirectionalTiming, markerCount: inputs.Count);
                 for (var i = 0; i < sectors.Count; i++)
                 {
                     if (!TryBuildDirectionalFrame(sectors[i], language, out var frame)) continue;
@@ -599,7 +770,15 @@ namespace ItemShareFix
 
             if (_clusterFrames.Count != _views.Count) structuralInvalidated = true;
             ResolveCurrentPlacements(structuralInvalidated, projectionInvalidated);
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2LayoutTiming, markerCount: inputs.Count);
+            }
 
+            var c2ApplyTiming = C2HitchDiagnostics.Begin(C2HitchPhase.NativeApplyViews, markerCount: inputs.Count);
+            try
+            {
             for (var i = 0; i < _clusterFrames.Count; i++)
             {
                 var frame = _clusterFrames[i];
@@ -636,7 +815,15 @@ namespace ItemShareFix
                         frame.Projection));
                 }
             }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2ApplyTiming, markerCount: inputs.Count);
+            }
 
+            var c2CleanupTiming = C2HitchDiagnostics.Begin(C2HitchPhase.NativePostRenderCleanup, markerCount: inputs.Count);
+            try
+            {
             _staleKeys.Clear();
             foreach (var key in _views.Keys)
                 if (!_activeClusterKeys.Contains(key)) _staleKeys.Add(key);
@@ -647,14 +834,24 @@ namespace ItemShareFix
             foreach (var key in _placementRankByKey.Keys)
                 if (!_activeClusterKeys.Contains(key)) _staleKeys.Add(key);
             for (var i = 0; i < _staleKeys.Count; i++) _placementRankByKey.Remove(_staleKeys[i]);
-        }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2CleanupTiming, markerCount: inputs.Count);
+            }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2Timing, markerCount: inputs.Count);
+            }
+}
 
         private void EmitDenseLifecycle(MarkerDenseAreaUpdate update)
         {
-            if (!update.MembershipChanged) return;
+            if (_isolatedColdPrimer || !DiagnosticInfoEnabled || !update.MembershipChanged) return;
             var summaryCount = 0;
             for (var i = 0; i < update.Nodes.Count; i++) if (update.Nodes[i].IsDenseSummary) summaryCount++;
-            _log.LogInfo("ISF_MARKER_DENSE nodes=" + update.Nodes.Count
+            LogDiagnosticInfo("ISF_MARKER_DENSE nodes=" + update.Nodes.Count
                 + " summaries=" + summaryCount
                 + " merge=" + MarkerDenseAreaSummaryTracker.MergeRadiusMeters.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
                 + " split=" + MarkerDenseAreaSummaryTracker.SplitRadiusMeters.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
@@ -725,10 +922,59 @@ namespace ItemShareFix
             _fovTracker.Prune(_denseNodeByKey.Keys);
         }
 
+        private void BuildScreenPresentationNodes(Camera camera, bool semanticDue)
+        {
+            _screenCandidates.Clear();
+            var nodes = _denseTracker.Nodes;
+            for (var i = 0; i < nodes.Count; i++)
+            {
+                var node = nodes[i];
+                if (!_activeWorldPresentationKeys.Contains(node.StableKey)
+                    || !TryCurrentWorldAnchor(node.PresentationCluster, out var anchor)
+                    || !TryProject(camera, anchor, out var projection)) continue;
+                _screenCandidates.Add(new MarkerScreenCandidate(node.StableKey,
+                    projection.X / Screen.width, projection.Y / Screen.height, node.TotalCount));
+            }
+            _screenTracker.Update(_screenCandidates,
+                _diagnosticConfig?.AutomaticMarkerDeclutter.Value ?? false,
+                _diagnosticConfig?.MaxVisibleMarkerCards.Value ?? MarkerScreenDeclutterTracker.DefaultCardLimit);
+            if (!_screenTracker.Active)
+            {
+                _worldPresentationNodes.Clear();
+                for (var i = 0; i < nodes.Count; i++)
+                    if (_activeWorldPresentationKeys.Contains(nodes[i].StableKey)) _worldPresentationNodes.Add(nodes[i]);
+            }
+            else if (_screenTracker.MembershipChanged || semanticDue || _worldPresentationNodes.Count == 0)
+            {
+                _worldPresentationNodes.Clear();
+                var groups = _screenTracker.Groups;
+                for (var i = 0; i < groups.Count; i++)
+                {
+                    var group = groups[i];
+                    _screenNodeBuffer.Clear();
+                    for (var k = 0; k < group.Keys.Count; k++)
+                        if (_denseNodeByKey.TryGetValue(group.Keys[k], out var source)) _screenNodeBuffer.Add(source);
+                    if (_screenNodeBuffer.Count == 0) continue;
+                    if (_screenNodeBuffer.Count == 1) _worldPresentationNodes.Add(_screenNodeBuffer[0]);
+                    else
+                    {
+                        // Reserved UI key lane, disjoint across cells; guard even an adversarial physical-key collision.
+                        var key = long.MinValue + 1024 + group.Cell;
+                        while (_denseNodeByKey.ContainsKey(key)) key += 32;
+                        _worldPresentationNodes.Add(MarkerDenseAreaSummaryTracker.BuildScreenNode(key, _screenNodeBuffer));
+                    }
+                }
+            }
+            if (_screenTracker.MembershipChanged) _placementCacheValid = false;
+            _activeWorldPresentationKeys.Clear();
+            for (var i = 0; i < _worldPresentationNodes.Count; i++)
+                _activeWorldPresentationKeys.Add(_worldPresentationNodes[i].StableKey);
+        }
+
         private void BuildExpansionCandidates(Camera camera)
         {
             _expansionCandidates.Clear();
-            var nodes = _denseTracker.Nodes;
+            var nodes = _worldPresentationNodes;
             var resolutionScale = Mathf.Min(Screen.width / 1920f, Screen.height / 1080f);
             if (!IsFinite(resolutionScale) || resolutionScale <= 0f) resolutionScale = 1f;
             var centerX = Screen.width * 0.5f;
@@ -746,7 +992,23 @@ namespace ItemShareFix
                 var dx = projection.X - centerX;
                 var dy = projection.Y - centerY;
                 var reticle1080 = Mathf.Sqrt(dx * dx + dy * dy) / resolutionScale;
-                _expansionCandidates.Add(new MarkerExpansionCandidate(node.StableKey, cluster.TotalCount, distance, reticle1080));
+                if (_screenTracker.Active)
+                {
+                    // Focus any actual member, not only the artificial centre of a large screen group.
+                    for (var m = 0; m < cluster.MemberStableKeys.Count; m++)
+                    {
+                        if (!_inputByStableKey.TryGetValue(cluster.MemberStableKeys[m], out var member)
+                            || !TryProject(camera, member.WorldPosition, out var memberProjection)
+                            || memberProjection.Mode != MarkerHudMode.OnScreenWorldAnchor) continue;
+                        var mx = memberProjection.X - centerX;
+                        var my = memberProjection.Y - centerY;
+                        reticle1080 = Math.Min(reticle1080, Mathf.Sqrt(mx * mx + my * my) / resolutionScale);
+                        distance = Math.Min(distance, member.DistanceMeters);
+                    }
+                }
+                _expansionCandidates.Add(new MarkerExpansionCandidate(node.StableKey,
+                    _screenTracker.Active ? Math.Max(MarkerAdaptiveLodTracker.DenseClusterMinimumMembers, cluster.TotalCount) : cluster.TotalCount,
+                    distance, reticle1080));
             }
         }
 
@@ -767,8 +1029,9 @@ namespace ItemShareFix
             if (!TryRepresentative(cluster, out var representative)) return false;
 
             var view = GetOrCreateView(node.StableKey);
-            var plan = GetOrBuildPresentationPlan(view, cluster, distance, expanded, language);
-            var measurement = GetOrMeasureVisualFootprint(view, cluster, plan, _presentationSettings);
+            var settings = MarkerScreenDeclutterTracker.BuildSettings(_presentationSettings, _screenTracker.Active, expanded);
+            var plan = GetOrBuildPresentationPlan(view, cluster, distance, expanded, language, settings);
+            var measurement = GetOrMeasureVisualFootprint(view, cluster, plan, settings);
             var mainColor = ResolveMainColor(cluster, representative, plan.NeutralMainSemantic);
             frame = new ClusterFrame(node.StableKey, false, cluster, representative, anchor, distance, projection, plan, mainColor, measurement, view);
             return true;
@@ -836,14 +1099,15 @@ namespace ItemShareFix
             MarkerSemanticCluster cluster,
             int distanceMeters,
             bool expanded,
-            MarkerLanguage language)
+            MarkerLanguage language,
+            MarkerPresentationSettings settings)
         {
-            var effectiveDistance = _presentationSettings.ShowDistance ? distanceMeters : -1;
+            var effectiveDistance = settings.ShowDistance ? distanceMeters : -1;
             if (view.HasPresentationPlan
                 && ReferenceEquals(view.PresentationPlanCluster, cluster)
-                && view.PresentationPlanMode == _presentationSettings.Mode
-                && view.PresentationPlanShowDistance == _presentationSettings.ShowDistance
-                && view.PresentationPlanDetailRows == _presentationSettings.DetailRows
+                && view.PresentationPlanMode == settings.Mode
+                && view.PresentationPlanShowDistance == settings.ShowDistance
+                && view.PresentationPlanDetailRows == settings.DetailRows
                 && view.PresentationPlanDistanceMeters == effectiveDistance
                 && view.PresentationPlanExpanded == expanded
                 && view.PresentationPlanLanguage == language
@@ -852,13 +1116,15 @@ namespace ItemShareFix
                 return view.CachedPresentationPlan;
             }
 
-            var plan = MarkerClusterPresentationPolicy.Build(cluster, _presentationSettings, distanceMeters, expanded, language);
+            var c2Timing = C2HitchDiagnostics.Begin(C2HitchPhase.PresentationPlanBuild, markerCount: _c2DiagnosticMarkerInputCount);
+            var plan = MarkerClusterPresentationPolicy.Build(cluster, settings, distanceMeters, expanded, language);
+            C2HitchDiagnostics.End(c2Timing, markerCount: _c2DiagnosticMarkerInputCount);
             view.HasPresentationPlan = true;
             view.PresentationPlanCluster = cluster;
             view.CachedPresentationPlan = plan;
-            view.PresentationPlanMode = _presentationSettings.Mode;
-            view.PresentationPlanShowDistance = _presentationSettings.ShowDistance;
-            view.PresentationPlanDetailRows = _presentationSettings.DetailRows;
+            view.PresentationPlanMode = settings.Mode;
+            view.PresentationPlanShowDistance = settings.ShowDistance;
+            view.PresentationPlanDetailRows = settings.DetailRows;
             view.PresentationPlanDistanceMeters = effectiveDistance;
             view.PresentationPlanExpanded = expanded;
             view.PresentationPlanLanguage = language;
@@ -877,6 +1143,7 @@ namespace ItemShareFix
             {
                 _performance.RecordSingleMarkerFastPath();
                 var frame = _clusterFrames[0];
+                var c2SinglePlacementTiming = C2HitchDiagnostics.Begin(C2HitchPhase.LayoutSingleMarkerPlacement, markerCount: _c2DiagnosticMarkerInputCount);
                 MarkerHudPlacement placement;
                 var relativeUsable = _placementCacheValid && frame.View.HasRelativePlacement && !structuralInvalidated;
                 if (relativeUsable)
@@ -900,6 +1167,7 @@ namespace ItemShareFix
                 _placementByKey[frame.PresentationKey] = placement;
                 _placementRankByKey[frame.PresentationKey] = 0;
                 _placementCacheValid = true;
+                C2HitchDiagnostics.End(c2SinglePlacementTiming, markerCount: _c2DiagnosticMarkerInputCount);
                 return;
             }
 
@@ -1044,11 +1312,24 @@ namespace ItemShareFix
         private Color ResolveMainColor(MarkerSemanticCluster cluster, MarkerRenderInput representative, bool neutral)
         {
             if (neutral || cluster.IsMixedCategory) return SanitizeColor(_visualSettings.NeutralColor);
+            if (IsDlcCategory(cluster.HomogeneousCategory)) return SanitizeColor(representative.NativeColor);
             return ResolveConfiguredCategoryColor(cluster.HomogeneousCategory);
         }
 
         private Color ResolveCategoryColor(MarkerSemanticCluster cluster, MarkerSemanticCategory category)
-            => ResolveConfiguredCategoryColor(category);
+        {
+            if (IsDlcCategory(category))
+            {
+                for (var i = 0; i < cluster.MemberStableKeys.Count; i++)
+                    if (_inputByStableKey.TryGetValue(cluster.MemberStableKeys[i], out var input)
+                        && MarkerSemanticCategoryPolicy.From(input.Identity.Kind, input.Kind) == category)
+                        return SanitizeColor(input.NativeColor);
+            }
+            return ResolveConfiguredCategoryColor(category);
+        }
+
+        private static bool IsDlcCategory(MarkerSemanticCategory category)
+            => category == MarkerSemanticCategory.Hallowed || category == MarkerSemanticCategory.Hex || category == MarkerSemanticCategory.Page;
 
         private Color ResolveConfiguredCategoryColor(MarkerSemanticCategory category)
         {
@@ -1080,7 +1361,14 @@ namespace ItemShareFix
             var detailedItemWidthLimit = detailedItemRowCount > 0
                 ? MarkerClusterPresentationPolicy.BuildDetailedItemLabelWidthLimit(Screen.width, Screen.height, settings.Scale)
                 : float.PositiveInfinity;
-            var renderedText = BuildRenderedText(view.Label, cluster, plan, detailedItemWidthLimit);
+            var textTypography = new MarkerMeasurementCacheKey(
+                plan.Text, InstanceIdentity(view.Label.font), InstanceIdentity(view.Label.fontSharedMaterial),
+                fontSize, Screen.width, Screen.height, _typographyRevision);
+            if (!view.RenderedTextCache.TryGet(plan, cluster, textTypography, detailedItemWidthLimit, out var renderedText))
+            {
+                renderedText = BuildRenderedText(view.Label, cluster, plan, detailedItemWidthLimit);
+                view.RenderedTextCache.Store(plan, cluster, textTypography, detailedItemWidthLimit, renderedText);
+            }
             var desiredOverflow = detailedItemRowCount > 0 ? TextOverflowModes.Ellipsis : TextOverflowModes.Overflow;
             if (view.Label.overflowMode != desiredOverflow)
             {
@@ -1101,10 +1389,25 @@ namespace ItemShareFix
                 && MarkerRuntimeHotPathPolicy.CanReuseMeasurement(view.HasMeasurement, view.MeasurementKey, measurementKey))
                 return view.CachedMeasurement.AsCacheHit();
 
+            var c2Timing = C2HitchDiagnostics.Begin(C2HitchPhase.MeasureVisualFootprint, markerCount: _c2DiagnosticMarkerInputCount);
+            try
+            {
+
             if (!string.Equals(view.Label.text, renderedText, StringComparison.Ordinal)) view.Label.text = renderedText;
             var preferredWidth = float.NaN;
             var preferredHeight = float.NaN;
             var usedFallback = false;
+            // The first TMP preferred-size request is a proven cold subphase. Render one frame with the existing
+            // conservative footprint, then perform the exact TMP measurement on the following frame. This keeps
+            // text visible immediately while moving the 20-30 ms cold measurement out of the first-marker frame.
+            if (!view.InitialPreferredMeasurementDeferred)
+            {
+                view.InitialPreferredMeasurementDeferred = true;
+                if (!string.Equals(view.Label.text, renderedText, StringComparison.Ordinal)) view.Label.text = renderedText;
+                var deferredFootprint = MarkerHudNavigationPolicy.BuildMeasuredVisualFootprint(
+                    float.NaN, float.NaN, Screen.width, Screen.height, settings.Scale);
+                return new VisualMeasurement(deferredFootprint, float.NaN, true, true, renderedText);
+            }
             try
             {
                 _performance.RecordTmpPreferredMeasurement();
@@ -1121,7 +1424,7 @@ namespace ItemShareFix
                 if (!view.MeasurementFallbackLogged)
                 {
                     view.MeasurementFallbackLogged = true;
-                    _log.LogDebug("[ItemShareFix] TMP preferred-size unavailable; conservative footprint used: " + ex.GetType().Name);
+                    if (!_isolatedColdPrimer) _log.LogDebug("[ItemShareFix] TMP preferred-size unavailable; conservative footprint used: " + ex.GetType().Name);
                 }
             }
 
@@ -1170,7 +1473,12 @@ namespace ItemShareFix
             view.LastMeasuredLifetimeLayoutSignature = lifetimeLayoutSignature;
             view.HasMeasurement = true;
             return measurement;
-        }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2Timing, markerCount: _c2DiagnosticMarkerInputCount);
+            }
+}
 
         private static float CompactTextBandHeight(string text, int fontSize, float indicatorSize)
         {
@@ -1515,6 +1823,7 @@ namespace ItemShareFix
         {
             if (_canvasRect == null) return;
             var footprint = measurement.Footprint;
+            var c2TextStyleTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ApplyTextStyle, markerCount: _c2DiagnosticMarkerInputCount);
             var color = (Color32)SanitizeColor(mainColor);
             if (!view.HasColor || !view.LastColor.Equals(color))
             {
@@ -1550,7 +1859,9 @@ namespace ItemShareFix
                 view.AppliedBadgePlan = plan;
             }
             UpdateLifetimeIndicators(view, cluster, plan, footprint, measurement, directional ? _visualSettings.OffscreenScale : _presentationSettings.Scale);
+            C2HitchDiagnostics.End(c2TextStyleTiming, markerCount: _c2DiagnosticMarkerInputCount);
 
+            var c2GeometryTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ApplyGeometryLayout, markerCount: _c2DiagnosticMarkerInputCount);
             var hasRenderedCompactBadges = plan.ShowCompactCategoryDiamonds && plan.CategoryEntries.Count > 0;
             var hasRenderedDetailedRowDiamonds = plan.ShowDetailedCategoryRowDiamonds && plan.CategoryEntries.Count > 0;
             var hasDetailedItemLifetimeIndicator = plan.DetailedItemRows.Count > 0 && HasDetailedItemLifetimeIndicator(plan);
@@ -1647,7 +1958,9 @@ namespace ItemShareFix
                 }
                 _performance.RecordUiLayoutWrite(10);
             }
+            C2HitchDiagnostics.End(c2GeometryTiming, markerCount: _c2DiagnosticMarkerInputCount);
 
+            var c2ActivationTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ApplyActivation, markerCount: _c2DiagnosticMarkerInputCount);
             var indicatorRect = view.Indicator.rectTransform;
             var showPrimaryIndicator = directional || plan.ShowMainDiamond;
             if (view.Indicator.enabled != showPrimaryIndicator) view.Indicator.enabled = showPrimaryIndicator;
@@ -1708,6 +2021,7 @@ namespace ItemShareFix
                 ApplyAssociationCue(view, sourceProjection, placement, anchoredX, anchoredY);
             }
             if (!view.Root.activeSelf) view.Root.SetActive(true);
+            C2HitchDiagnostics.End(c2ActivationTiming, markerCount: _c2DiagnosticMarkerInputCount);
         }
 
         private string BuildRenderedText(TextMeshProUGUI label, MarkerSemanticCluster cluster, MarkerClusterPresentationPlan plan, float detailedItemWidthLimit)
@@ -1726,7 +2040,7 @@ namespace ItemShareFix
                 }
                 else
                 {
-                    rowColor = ResolveConfiguredCategoryColor(plan.CategoryEntries[i].Category);
+                    rowColor = ResolveCategoryColor(cluster, plan.CategoryEntries[i].Category);
                 }
                 lines[i] = "<color=#" + ColorHex(rowColor) + ">" + lines[i] + "</color>";
             }
@@ -2309,7 +2623,6 @@ namespace ItemShareFix
         {
             var fontSize = Math.Max(12, (int)Math.Round(MarkerPresentationPolicy.BuildScaledNativeHudFontSize(Screen.height, _presentationSettings.Scale) * 0.78f));
             if (_nativeFont != null && text.font != _nativeFont) text.font = _nativeFont;
-            if (_nativeFontMaterial != null && text.fontSharedMaterial != _nativeFontMaterial) text.fontSharedMaterial = _nativeFontMaterial;
             if (Math.Abs(text.fontSize - fontSize) > 0.01f) text.fontSize = fontSize;
         }
 
@@ -2317,17 +2630,17 @@ namespace ItemShareFix
         {
             var fontSize = Math.Max(11, (int)Math.Round(MarkerPresentationPolicy.BuildScaledNativeHudFontSize(Screen.height, markerScale) * 0.72f));
             if (_nativeFont != null && text.font != _nativeFont) text.font = _nativeFont;
-            if (_nativeFontMaterial != null && text.fontSharedMaterial != _nativeFontMaterial) text.fontSharedMaterial = _nativeFontMaterial;
             if (Math.Abs(text.fontSize - fontSize) > 0.01f) text.fontSize = fontSize;
         }
 
         private void EmitSemanticLifecycle(MarkerSemanticUpdate update)
         {
+            if (_isolatedColdPrimer || !DiagnosticInfoEnabled) return;
             for (var i = 0; i < update.LifecycleEvents.Count; i++)
             {
                 var evt = update.LifecycleEvents[i];
                 var cluster = evt.Cluster;
-                _log.LogInfo("ISF_MARKER_SEMANTIC event=" + LifecycleToken(evt.Kind)
+                LogDiagnosticInfo("ISF_MARKER_SEMANTIC event=" + LifecycleToken(evt.Kind)
                     + " clusterKey=" + cluster.StableKey
                     + " members=" + cluster.TotalCount
                     + " fingerprint=" + cluster.MemberFingerprint
@@ -2374,6 +2687,24 @@ namespace ItemShareFix
             return result;
         }
 
+        public void ObserveTmpSubMeshOnDisable(TMP_SubMeshUI subMesh)
+        {
+            if (_isolatedColdPrimer || !DiagnosticInfoEnabled || subMesh == null || _tmpOwnedOnDisableEvidenceCount >= 8 || _canvasObject == null) return;
+            try
+            {
+                if (!subMesh.transform.IsChildOf(_canvasObject.transform)) return;
+                _tmpOwnedOnDisableEvidenceCount++;
+                LogDiagnosticInfo("[ItemShareFix] ISF_TMP_SUBMESH_ONDISABLE owner=itemsharefix"
+                    + " ordinal=" + _tmpOwnedOnDisableEvidenceCount.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + " instanceId=" + subMesh.GetInstanceID().ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    + " active=" + subMesh.gameObject.activeInHierarchy.ToString());
+            }
+            catch
+            {
+                // Ownership evidence must never interfere with TMP/Unity lifecycle execution.
+            }
+        }
+
         public void SetPresentationSuppressed(bool suppressed)
         {
             if (_presentationSuppressed == suppressed) return;
@@ -2391,6 +2722,10 @@ namespace ItemShareFix
             _activeClusterKeys.Clear();
             _semanticTracker.Clear();
             _denseTracker.Clear();
+            _screenTracker.Clear();
+            _screenCandidates.Clear();
+            _worldPresentationNodes.Clear();
+            _screenNodeBuffer.Clear();
             _fovTracker.Clear();
             _lodTracker.Clear();
             _directionalInputs.Clear();
@@ -2408,13 +2743,17 @@ namespace ItemShareFix
 
         public void Dispose()
         {
+            EmitTmpTeardownOwnershipEvidence();
             Clear();
-            if (_canvasObject != null) UnityEngine.Object.Destroy(_canvasObject);
+            if (_canvasObject != null)
+            {
+                if (_canvasObject.activeSelf) _canvasObject.SetActive(false);
+                UnityEngine.Object.Destroy(_canvasObject);
+            }
             _canvasObject = null;
             _canvas = null;
             _canvasRect = null;
             _nativeFont = null;
-            _nativeFontMaterial = null;
             _typographyResolved = false;
             _typographyRevision = 0;
             _indicatorSourceLogged = false;
@@ -2427,6 +2766,9 @@ namespace ItemShareFix
         private void EnsureCanvas()
         {
             if (_canvasObject != null && _canvas != null && _canvasRect != null) return;
+            var c2Timing = C2HitchDiagnostics.Begin(C2HitchPhase.EnsureCanvas, markerCount: _c2DiagnosticMarkerInputCount);
+            try
+            {
             _canvasObject = new GameObject("ItemShareFix.NativeHudMarkerCanvas", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler));
             _canvasObject.layer = ResolveUiLayer();
             UnityEngine.Object.DontDestroyOnLoad(_canvasObject);
@@ -2435,7 +2777,8 @@ namespace ItemShareFix
             _canvas.overrideSorting = true;
             _canvas.sortingOrder = 95;
             _canvas.pixelPerfect = false;
-            _canvas.enabled = !_presentationSuppressed;
+            _canvas.enabled = !_presentationSuppressed && !_isolatedColdPrimer;
+            if (_isolatedColdPrimer) _canvasObject.SetActive(false);
             var scaler = _canvasObject.GetComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
             scaler.scaleFactor = 1f;
@@ -2448,15 +2791,23 @@ namespace ItemShareFix
             if (!_indicatorSourceLogged)
             {
                 _indicatorSourceLogged = true;
-                _log.LogInfo("[ItemShareFix] indicator asset source=" + MarkerPresentationPolicy.IndicatorAssetSourceToken
+                if (!_isolatedColdPrimer) LogDiagnosticInfo("[ItemShareFix] indicator asset source=" + MarkerPresentationPolicy.IndicatorAssetSourceToken
                     + " family=" + MarkerPresentationPolicy.IndicatorVisualFamilyToken
                     + " semantic=world-space-cluster adaptiveLod=true style=" + MarkerHudNavigationPolicy.NativeHudStyleToken);
             }
-        }
+                    }
+            finally
+            {
+                C2HitchDiagnostics.End(c2Timing, markerCount: _c2DiagnosticMarkerInputCount);
+            }
+}
 
         private MarkerView GetOrCreateView(long clusterKey)
         {
             if (_views.TryGetValue(clusterKey, out var existing) && existing.Root != null) return existing;
+            var c2Timing = C2HitchDiagnostics.Begin(C2HitchPhase.GetOrCreateView, markerCount: _c2DiagnosticMarkerInputCount);
+            try
+            {
             var root = new GameObject("ISF.SemanticCluster." + clusterKey, typeof(RectTransform), typeof(CanvasGroup));
             root.layer = ResolveUiLayer();
             root.transform.SetParent(_canvasRect!, false);
@@ -2501,7 +2852,12 @@ namespace ItemShareFix
             _views[clusterKey] = view;
             _placementCacheValid = false;
             return view;
-        }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2Timing, markerCount: _c2DiagnosticMarkerInputCount);
+            }
+}
 
         private TextMeshProUGUI CreateText(Transform parent, string name)
         {
@@ -2577,7 +2933,6 @@ namespace ItemShareFix
             if (!MarkerRuntimeHotPathPolicy.ShouldApplyTypography(view.AppliedTypographyRevision, view.AppliedFontSize, _typographyRevision, fontSize)) return;
             var text = view.Label;
             if (_nativeFont != null && text.font != _nativeFont) text.font = _nativeFont;
-            if (_nativeFontMaterial != null && text.fontSharedMaterial != _nativeFontMaterial) text.fontSharedMaterial = _nativeFontMaterial;
             if (Math.Abs(text.fontSize - fontSize) > 0.01f) text.fontSize = fontSize;
             if (Math.Abs(text.outlineWidth - 0.14f) > 0.001f) text.outlineWidth = 0.14f;
             var outlineColor = new Color32(4, 6, 10, 238);
@@ -2593,8 +2948,52 @@ namespace ItemShareFix
             catch { return 0; }
         }
 
+        private void ResolveFallbackTypographyWithoutGlobalDiscovery()
+        {
+            _typographyResolved = true;
+            _typographyRevision = _typographyRevision == int.MaxValue ? 1 : _typographyRevision + 1;
+            try { _nativeFont = TMP_Settings.defaultFontAsset; } catch { _nativeFont = null; }
+            foreach (var view in _views.Values)
+            {
+                view.AppliedTypographyRevision = int.MinValue;
+                view.HasMeasurement = false;
+            }
+        }
+
+        private void EmitTmpTeardownOwnershipEvidence()
+        {
+            if (_isolatedColdPrimer || !DiagnosticInfoEnabled || _teardownOwnershipEvidenceLogged) return;
+            _teardownOwnershipEvidenceLogged = true;
+            var rootCount = 0;
+            var labelCount = 0;
+            var subMeshCount = 0;
+            foreach (var view in _views.Values)
+            {
+                if (view.Root == null) continue;
+                rootCount++;
+                try
+                {
+                    labelCount += view.Root.GetComponentsInChildren<TextMeshProUGUI>(true).Length;
+                    subMeshCount += view.Root.GetComponentsInChildren<TMP_SubMeshUI>(true).Length;
+                }
+                catch
+                {
+                    // Evidence is diagnostic-only; teardown must continue even if Unity is already dismantling UI.
+                }
+            }
+            LogDiagnosticInfo("[ItemShareFix] ISF_TMP_TEARDOWN_OWNERSHIP owner=itemsharefix"
+                + " markerRoots=" + rootCount.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " tmpLabels=" + labelCount.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " tmpSubMeshes=" + subMeshCount.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " strategy=deactivate-before-deferred-destroy");
+        }
+
         private void ResolveNativeTypography()
         {
+            var c2Timing = C2HitchDiagnostics.Begin(C2HitchPhase.ResolveNativeTypography, markerCount: _c2DiagnosticMarkerInputCount);
+            try
+            {
+
             _typographyResolved = true;
             _typographyRevision = _typographyRevision == int.MaxValue ? 1 : _typographyRevision + 1;
             TextMeshProUGUI? best = null;
@@ -2606,12 +3005,13 @@ namespace ItemShareFix
                     if (candidate == null || candidate.font == null || candidate.gameObject == null) continue;
                     if (_canvasObject != null && candidate.transform.IsChildOf(_canvasObject.transform)) continue;
                     if (!candidate.gameObject.scene.IsValid()) continue;
-                    var name = (candidate.gameObject.name ?? string.Empty).ToLowerInvariant();
+                    var name = candidate.gameObject.name ?? string.Empty;
                     var score = candidate.gameObject.activeInHierarchy ? 4 : 0;
-                    if (name.Contains("ping")) score += 12;
-                    if (name.Contains("objective")) score += 9;
-                    if (name.Contains("hud")) score += 7;
-                    if (name.Contains("money") || name.Contains("level")) score += 5;
+                    if (name.IndexOf("ping", StringComparison.OrdinalIgnoreCase) >= 0) score += 12;
+                    if (name.IndexOf("objective", StringComparison.OrdinalIgnoreCase) >= 0) score += 9;
+                    if (name.IndexOf("hud", StringComparison.OrdinalIgnoreCase) >= 0) score += 7;
+                    if (name.IndexOf("money", StringComparison.OrdinalIgnoreCase) >= 0
+                        || name.IndexOf("level", StringComparison.OrdinalIgnoreCase) >= 0) score += 5;
                     if (score <= bestScore) continue;
                     bestScore = score;
                     best = candidate;
@@ -2625,14 +3025,12 @@ namespace ItemShareFix
             if (best != null)
             {
                 _nativeFont = best.font;
-                _nativeFontMaterial = best.fontSharedMaterial;
-                _log.LogInfo("[ItemShareFix] native HUD typography source=" + best.gameObject.name + " style=" + MarkerHudNavigationPolicy.NativeHudStyleToken);
+                LogDiagnosticInfo("[ItemShareFix] native HUD typography source=" + best.gameObject.name + " style=" + MarkerHudNavigationPolicy.NativeHudStyleToken);
             }
             else
             {
                 try { _nativeFont = TMP_Settings.defaultFontAsset; } catch { _nativeFont = null; }
-                _nativeFontMaterial = null;
-                _log.LogInfo("[ItemShareFix] native HUD typography source=TMP-default style=" + MarkerHudNavigationPolicy.NativeHudStyleToken);
+                    LogDiagnosticInfo("[ItemShareFix] native HUD typography source=TMP-default style=" + MarkerHudNavigationPolicy.NativeHudStyleToken);
             }
 
             foreach (var view in _views.Values)
@@ -2640,7 +3038,12 @@ namespace ItemShareFix
                 view.AppliedTypographyRevision = int.MinValue;
                 view.HasMeasurement = false;
             }
-        }
+                    }
+            finally
+            {
+                C2HitchDiagnostics.End(c2Timing, markerCount: _c2DiagnosticMarkerInputCount);
+            }
+}
 
         private static ulong ComputeSemanticInputSignature(IReadOnlyList<MarkerRenderInput> inputs)
         {
@@ -2758,7 +3161,14 @@ namespace ItemShareFix
         private void RemoveView(long clusterKey)
         {
             if (!_views.TryGetValue(clusterKey, out var view)) return;
-            if (view.Root != null) UnityEngine.Object.Destroy(view.Root);
+            if (view.Root != null)
+            {
+                // Disable owned TMP/UI components synchronously while their font/material assets are still valid.
+                // UnityEngine.Object.Destroy is deferred; leaving the hierarchy active until end-of-frame allowed
+                // TMP_SubMeshUI.OnDisable to run later during asset teardown.
+                if (view.Root.activeSelf) view.Root.SetActive(false);
+                UnityEngine.Object.Destroy(view.Root);
+            }
             _views.Remove(clusterKey);
             _placementCacheValid = false;
         }

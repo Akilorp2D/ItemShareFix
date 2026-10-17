@@ -246,6 +246,23 @@ namespace ItemShareFix.Core
     /// </summary>
     public static class MarkerHudNavigationPolicy
     {
+        // One resolution per thread: collision probes must not allocate HUD arrays/enumerators.
+        [ThreadStatic] private static IReadOnlyList<MarkerHudExclusionZone>? _reservedZones;
+        [ThreadStatic] private static float _reservedWidth;
+        [ThreadStatic] private static float _reservedHeight;
+        public const int MaxHardHudEscapeGridCandidates = 256;
+
+        private static IReadOnlyList<MarkerHudExclusionZone> CachedReservedHudZones(float width, float height)
+        {
+            if (_reservedZones == null || _reservedWidth != width || _reservedHeight != height)
+            {
+                _reservedZones = GetReservedHudZones(width, height);
+                _reservedWidth = width;
+                _reservedHeight = height;
+            }
+            return _reservedZones;
+        }
+
         public const string NativeHudStyleToken = "ISF_ROR2_HUD_NATIVE_V5_C16";
         public const string IndicatorVisualFamilyToken = "ISF_UI_GRAPHIC_INDICATOR_V1";
         public const float ReferenceWidth = 1920f;
@@ -375,6 +392,12 @@ namespace ItemShareFix.Core
             if (dynamicHudZones == null) return false;
             var padding = 4f * ResolutionScale(screenWidth, screenHeight);
             var expanded = rect.Inflated(padding);
+            if (dynamicHudZones is IReadOnlyList<MarkerHudExclusionZone> indexedZones)
+            {
+                for (var i = 0; i < indexedZones.Count; i++)
+                    if (RectIntersectsZone(expanded, indexedZones[i])) return true;
+                return false;
+            }
             foreach (var zone in dynamicHudZones)
             {
                 if (RectIntersectsZone(expanded, zone)) return true;
@@ -387,9 +410,10 @@ namespace ItemShareFix.Core
             if (!IsFiniteRect(rect) || screenWidth <= 0f || screenHeight <= 0f) return true;
             var padding = 4f * ResolutionScale(screenWidth, screenHeight);
             var expanded = rect.Inflated(padding);
-            foreach (var zone in GetReservedHudZones(screenWidth, screenHeight))
+            var zones = CachedReservedHudZones(screenWidth, screenHeight);
+            for (var i = 0; i < zones.Count; i++)
             {
-                if (RectIntersectsZone(expanded, zone)) return true;
+                if (RectIntersectsZone(expanded, zones[i])) return true;
             }
             return false;
         }
@@ -911,12 +935,14 @@ namespace ItemShareFix.Core
                 Math.Max(Math.Abs(desiredX - minX), Math.Abs(maxX - desiredX)),
                 Math.Max(Math.Abs(desiredY - minY), Math.Abs(maxY - desiredY)));
             var maxSearchRing = Math.Max(1, (int)Math.Ceiling(maxSearchRadius / searchStep));
+            var remainingGridCandidates = MaxHardHudEscapeGridCandidates;
             for (var ring = 1; ring <= maxSearchRing; ring++)
             {
+                if (remainingGridCandidates <= 0) break;
                 var radius = ring * searchStep;
                 if (found && radius * radius > bestDistanceSquared + Epsilon) break;
 
-                for (var ix = -ring; ix <= ring; ix++)
+                for (var ix = -ring; ix <= ring && remainingGridCandidates >= 2; ix++, remainingGridCandidates -= 2)
                 {
                     var x = desiredX + ix * searchStep;
                     ConsiderHardHudEscapeCandidate(x, desiredY - radius, desiredX, desiredY, footprint, occupied, dynamicHudZones,
@@ -925,7 +951,7 @@ namespace ItemShareFix.Core
                         screenWidth, screenHeight, minX, maxX, minY, maxY, ref found, ref bestDistanceSquared, ref bestX, ref bestY);
                 }
 
-                for (var iy = -ring + 1; iy <= ring - 1; iy++)
+                for (var iy = -ring + 1; iy <= ring - 1 && remainingGridCandidates >= 2; iy++, remainingGridCandidates -= 2)
                 {
                     var y = desiredY + iy * searchStep;
                     ConsiderHardHudEscapeCandidate(desiredX - radius, y, desiredX, desiredY, footprint, occupied, dynamicHudZones,

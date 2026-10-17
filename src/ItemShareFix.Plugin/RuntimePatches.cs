@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using RoR2;
+using TMPro;
 using UnityEngine;
 using UnityEngine.Networking;
 using ItemShareFix.Core;
@@ -17,6 +18,47 @@ namespace ItemShareFix
         private static FieldInfo? _itemShareClaimsField;
         private static FieldInfo? _itemShareDistributedField;
         private static FieldInfo? _itemShareChoicesField;
+        [ThreadStatic] private static SharedInteractionContext<PickupDef>? _sharingContext;
+        private static SharedInteractionContext<PickupDef> SharingContext
+            => _sharingContext ??= new SharedInteractionContext<PickupDef>();
+
+        private sealed class CommandSelectionState
+        {
+            public bool Bypassed;
+            public IDisposable? Scope;
+        }
+
+        internal static bool CanRetainSharedPickup(Component owner, PickupDef def)
+            => _server != null && _server.CanRetainSharedPickup(owner, def);
+
+        internal static void ObserveLocalSharingOption(Component owner, PickupDef def, bool alreadyShared, bool shareable)
+            => _server?.ObserveLocalSharingOption(owner, def, alreadyShared, shareable);
+
+        internal static void RequestPresentationRefresh() => _presentation?.RequestRefresh();
+
+        internal static bool TryGetSnapshotCollected(Component owner, uint master, out bool collected)
+        {
+            collected = false;
+            return _server != null && _server.TryGetSnapshotCollected(owner, master, out collected);
+        }
+
+        private sealed class SharingScope : IDisposable
+        {
+            private readonly IDisposable _scope;
+            private readonly int _instanceId;
+            private readonly bool _command;
+            private bool _disposed;
+            public SharingScope(IDisposable scope, int instanceId, bool command)
+            { _scope = scope; _instanceId = instanceId; _command = command; }
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _scope.Dispose();
+                _disposed = true;
+                if (!ContainsInstanceId(_command ? _itemShareChoicesField : _itemShareClaimsField, _instanceId))
+                    _server?.ReleaseSharingPolicy(_instanceId);
+            }
+        }
 
         public static void Install(Harmony harmony, CompatibilityResult compatibility, ServerCoordinator server, ClientPresentationCoordinator presentation)
         {
@@ -29,11 +71,13 @@ namespace ItemShareFix
             _itemShareDistributedField = RequiredField(pluginType, "Distributed");
             _itemShareChoicesField = RequiredField(pluginType, "Choices");
 
-            Patch(harmony, Required(pluginType, "OnAttemptGrant", 3, typeof(void), isStatic: true), prefix: nameof(ItemShareAttemptGrantPrefix));
+            Patch(harmony, Required(pluginType, "IsShareable", 1, typeof(bool), isStatic: true), postfix: nameof(DlcShareabilityPostfix));
+
+            Patch(harmony, Required(pluginType, "OnAttemptGrant", 3, typeof(void), isStatic: true), prefix: nameof(ItemShareAttemptGrantPrefix), postfix: nameof(SharingScopePostfix), finalizer: nameof(SharingScopeFinalizer));
             Patch(harmony, Required(pluginType, "GrantIndividual", 5, typeof(void), isStatic: true), prefix: nameof(GrantIndividualPrefix), postfix: nameof(DistributionPostfix), finalizer: nameof(DistributionFinalizer));
             Patch(harmony, Required(pluginType, "GrantInstant", 5, typeof(void), isStatic: true), prefix: nameof(GrantInstantPrefix), postfix: nameof(DistributionPostfix), finalizer: nameof(DistributionFinalizer));
             Patch(harmony, Required(pluginType, "IsDown", 1, typeof(bool), isStatic: true), postfix: nameof(IsDownPostfix));
-            Patch(harmony, Required(pluginType, "OnPickupSelected", 3, typeof(void), isStatic: true), prefix: nameof(ItemShareCommandSelectionPrefix), postfix: nameof(ItemShareCommandSelectionPostfix));
+            Patch(harmony, Required(pluginType, "OnPickupSelected", 3, typeof(void), isStatic: true), prefix: nameof(ItemShareCommandSelectionPrefix), postfix: nameof(ItemShareCommandSelectionPostfix), finalizer: nameof(CommandSharingScopeFinalizer));
             Patch(harmony, Required(pluginType, "GiveDirect", 3, typeof(bool), isStatic: true), prefix: nameof(GiveDirectPrefix));
             Patch(harmony, Required(pluginType, "LocalPlayersHaveTaken", 1, typeof(bool), isStatic: true), postfix: nameof(LocalPlayersHaveTakenPostfix));
             Patch(harmony, Required(pluginType, "ApplyOrbVisibility", 2, typeof(void), isStatic: true), postfix: nameof(ApplyOrbVisibilityPostfix));
@@ -49,12 +93,49 @@ namespace ItemShareFix
                 Patch(harmony, compatibility.DisconnectMethod, prefix: nameof(NetworkDestroyObservationPrefix));
 
             InstallBlockingModalLifecyclePatches(harmony);
+            InstallHudLifecyclePatches(harmony);
+            InstallTmpSubMeshLifecycleDiagnosticPatch(harmony);
         }
 
-        private static bool ItemShareAttemptGrantPrefix(object[] __args)
+        private static void DlcShareabilityPostfix(object[] __args, ref bool __result)
         {
+            if (__result || _server == null || __args.Length != 1 || __args[0] is not PickupDef def) return;
+            __result = (_sharingContext != null && _sharingContext.IsOwned(def))
+                || _server.IsDlcPickupShareable(def);
+        }
+
+        private static void SharingScopePostfix(IDisposable? __state) => __state?.Dispose();
+
+        private static Exception? SharingScopeFinalizer(Exception? __exception, IDisposable? __state)
+        {
+            __state?.Dispose();
+            return __exception;
+        }
+
+        private static bool ItemShareAttemptGrantPrefix(object[] __args, out IDisposable? __state)
+        {
+            __state = null;
             if (_server == null || !NetworkServer.active || __args.Length != 3) return true;
             if (__args[1] is not GenericPickupController self) return true;
+            var interactionDef = PickupCatalog.GetPickupDef(self.pickup.pickupIndex);
+            var shared = ContainsInstanceId(_itemShareClaimsField, self.GetInstanceID());
+            var retain = false;
+            using (SharingContext.Enter(interactionDef, false))
+            {
+                _server.PrepareSharingPolicy(self, shared);
+                retain = shared && interactionDef != null && _server.CanRetainSharedPickup(self, interactionDef);
+            }
+            __state = new SharingScope(SharingContext.Enter(interactionDef, retain), self.GetInstanceID(), command: false);
+
+            // Exact provider progression pickups must never enter ItemShare's claim/distribution path.
+            // Invoke the supplied original pickup grant directly so provider/vanilla collection semantics
+            // remain authoritative while bypassing ItemShare before it can claim this world pickup.
+            if (_server.KnownProgressionPickupExclusionsEnabled
+                && KnownProgressionPickupCompatibility.IsExcluded(self))
+            {
+                InvokeSuppliedOriginal(__args[0], self, __args[2]);
+                return false;
+            }
 
             var pickup = self.pickup;
             var isTemporary = pickup.isTempItem;
@@ -81,9 +162,9 @@ namespace ItemShareFix
             return false;
         }
 
-        private static bool ItemShareCommandSelectionPrefix(object[] __args, out bool __state)
+        private static bool ItemShareCommandSelectionPrefix(object[] __args, out CommandSelectionState __state)
         {
-            __state = false;
+            __state = new CommandSelectionState();
             if (_server == null || !NetworkServer.active || __args.Length != 3) return true;
             if (__args[1] is not PickupPickerController picker || __args[2] is not int choiceIndex) return true;
             if (picker.options == null || choiceIndex < 0 || choiceIndex >= picker.options.Length) return true;
@@ -91,6 +172,24 @@ namespace ItemShareFix
             var option = picker.options[choiceIndex];
             if (!option.available) return true;
             var selectedPickup = option.pickup;
+            var selectedDef = PickupCatalog.GetPickupDef(selectedPickup.pickupIndex);
+            var shared = ContainsInstanceId(_itemShareChoicesField, picker.GetInstanceID());
+            var retain = false;
+            using (SharingContext.Enter(selectedDef, false))
+            {
+                _server.PrepareSharingPolicy(picker, shared);
+                retain = shared && selectedDef != null && _server.CanRetainSharedPickup(picker, selectedDef);
+            }
+            __state.Scope = new SharingScope(SharingContext.Enter(selectedDef, retain), picker.GetInstanceID(), command: true);
+            if (_server.KnownProgressionPickupExclusionsEnabled
+                && KnownProgressionPickupCompatibility.IsExcluded(PickupCatalog.GetPickupDef(selectedPickup.pickupIndex)))
+            {
+                // Bypass before ItemShare creates Choices or gives an item directly.
+                // The supplied selection preserves the provider's progression callbacks.
+                __state.Bypassed = true;
+                InvokeSuppliedOriginal(__args[0], picker, choiceIndex);
+                return false;
+            }
             var isTemporary = selectedPickup.isTempItem;
             if (!isTemporary) return true;
 
@@ -111,35 +210,32 @@ namespace ItemShareFix
 
             InvokeSuppliedOriginal(__args[0], picker, choiceIndex);
             _server.LogTemporaryPolicy("command", instanceId, shareTemporaryItems, "vanilla-bypass", "prechoices");
-            __state = true;
+            __state.Bypassed = true;
             return false;
         }
 
-        private static void GrantIndividualPrefix(object[] __args, out bool __state)
+        private static void GrantIndividualPrefix(object[] __args, out OwnedContextStack<ServerCoordinator.DistributionContext>.Lease? __state)
         {
-            __state = false;
+            __state = null;
             if (_server == null) return;
-            _server.BeginDistribution(__args, instant: false);
-            __state = _server.InDistribution;
+            __state = _server.BeginDistribution(__args, instant: false);
         }
 
-        private static void GrantInstantPrefix(object[] __args, out bool __state)
+        private static void GrantInstantPrefix(object[] __args, out OwnedContextStack<ServerCoordinator.DistributionContext>.Lease? __state)
         {
-            __state = false;
+            __state = null;
             if (_server == null) return;
-            _server.BeginDistribution(__args, instant: true);
-            __state = _server.InDistribution;
+            __state = _server.BeginDistribution(__args, instant: true);
         }
 
-        private static void DistributionPostfix(bool __state)
+        private static void DistributionPostfix(OwnedContextStack<ServerCoordinator.DistributionContext>.Lease? __state)
         {
-            if (__state) _server?.EndDistribution(successful: true);
+            if (__state != null) _server?.EndDistribution(__state, successful: true);
         }
 
-        private static Exception? DistributionFinalizer(Exception? __exception, bool __state)
+        private static Exception? DistributionFinalizer(Exception? __exception, OwnedContextStack<ServerCoordinator.DistributionContext>.Lease? __state)
         {
-            if (__exception != null && __state && _server != null && _server.InDistribution)
-                _server.EndDistribution(successful: false);
+            if (__state != null) _server?.EndDistribution(__state, successful: false);
             return __exception;
         }
 
@@ -150,11 +246,21 @@ namespace ItemShareFix
             if (master != null && _server.ShouldTreatAsActive(master)) __result = false;
         }
 
-        private static void ItemShareCommandSelectionPostfix(object[] __args, bool __state)
+        private static void ItemShareCommandSelectionPostfix(object[] __args, CommandSelectionState? __state)
         {
-            if (__state || _server == null) return;
-            var picker = __args.OfType<PickupPickerController>().FirstOrDefault();
-            if (picker != null) _server.OnItemShareCommandSelectionCompleted(picker);
+            try
+            {
+                if (__state == null || __state.Bypassed || _server == null) return;
+                var picker = __args.OfType<PickupPickerController>().FirstOrDefault();
+                if (picker != null) _server.OnItemShareCommandSelectionCompleted(picker);
+            }
+            finally { __state?.Scope?.Dispose(); }
+        }
+
+        private static Exception? CommandSharingScopeFinalizer(Exception? __exception, CommandSelectionState? __state)
+        {
+            __state?.Scope?.Dispose();
+            return __exception;
         }
 
         private static bool GiveDirectPrefix(object[] __args)
@@ -257,6 +363,31 @@ namespace ItemShareFix
                 Patch(harmony, pickerSetOptions[i], postfix: nameof(BlockingModalLifecycleObservedPostfix));
             if (pickerAwake == null && pickerOnEnable == null && pickerSetOptions.Length == 0)
                 throw new MissingMethodException(pickerPanelType.FullName, "PickupPickerPanel open lifecycle/content signal (Awake/OnEnable/SetPickupOptions)");
+        }
+
+        private static void InstallTmpSubMeshLifecycleDiagnosticPatch(Harmony harmony)
+        {
+            var onDisable = DeclaredParameterless(typeof(TMP_SubMeshUI), "OnDisable");
+            if (onDisable != null) Patch(harmony, onDisable, prefix: nameof(TmpSubMeshOnDisableDiagnosticPrefix));
+        }
+
+        private static void TmpSubMeshOnDisableDiagnosticPrefix(TMP_SubMeshUI __instance)
+            => _presentation?.OnTmpSubMeshOnDisable(__instance);
+
+        private static void InstallHudLifecyclePatches(Harmony harmony)
+        {
+            var hudType = typeof(Run).Assembly.GetType("RoR2.UI.HUD", throwOnError: false);
+            if (hudType == null || !typeof(Component).IsAssignableFrom(hudType)) return;
+
+            var awake = DeclaredParameterless(hudType, "Awake");
+            var onEnable = DeclaredParameterless(hudType, "OnEnable");
+            if (awake != null) Patch(harmony, awake, postfix: nameof(HudLifecycleObservedPostfix));
+            if (onEnable != null) Patch(harmony, onEnable, postfix: nameof(HudLifecycleObservedPostfix));
+        }
+
+        private static void HudLifecycleObservedPostfix(object __instance)
+        {
+            if (__instance is Component component) _presentation?.OnHudLifecycleObserved(component);
         }
 
         private static MethodInfo? DeclaredParameterless(Type type, string name)

@@ -24,8 +24,8 @@ namespace ItemShareFix
         public const string UpstreamPluginGuid = "com.majai.itemshare";
         public const string PageDescription = "Fixes and extends ItemShare with personal pickup markers, temporary-item sharing, multiplayer fixes, and convenient in-game configuration.";
         public const string IconResourceName = "ItemShareFix.Resources.ItemShareFixIcon.png";
-        public const int CurrentMarkerOptionCount = 27;
-        public const int ItemShareFixOptionCount = CurrentMarkerOptionCount;
+        public const int CurrentMarkerOptionCount = 30;
+        public const int ItemShareFixOptionCount = CurrentMarkerOptionCount + 3;
         public const int RequiredUpstreamOptionCount = 15;
         public const int TotalOptionCount = ItemShareFixOptionCount + RequiredUpstreamOptionCount;
         public const string SharingCategory = "Sharing";
@@ -279,8 +279,14 @@ namespace ItemShareFix
         {
             failure = string.Empty;
             return AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.PersonalMarkersEnabled, instantMode, out failure)
+                && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.HideMarkersInTrials, instantMode, out failure)
+                && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.AutomaticMarkerDeclutter, instantMode, out failure)
+                && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.IntSliderOption", config.MaxVisibleMarkerCards, instantMode, out failure, 4f, 16f, null)
                 && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.ChoiceOption", config.MarkerPresentationMode, instantMode, out failure)
                 && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.ShareTemporaryItems, null, out failure)
+                && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.ShareHallowedItems, null, out failure)
+                && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.ShareHexItems, null, out failure)
+                && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.ShareNTormatPages, null, out failure)
                 && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.CheckBoxOption", config.ShowMarkerDistance, instantMode, out failure)
                 && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.StepSliderOption", config.MarkerScale, instantMode, out failure, 0.75f, 1.25f, 0.05f)
                 && AddLocalPlan(assembly, plans, "RiskOfOptions.Options.StepSliderOption", config.MarkerOpacity, instantMode, out failure, 0f, 1f, 0.05f)
@@ -336,7 +342,13 @@ namespace ItemShareFix
                 || !TryMovePlan(upstreamPlans, plans, "Lunar", out failure)
                 || !TryMovePlan(upstreamPlans, plans, "Void", out failure)
                 || !TryMovePlan(upstreamPlans, plans, "Food", out failure)
+                || !TryMovePlan(localPlans, plans, "ShareHallowedItems", out failure)
+                || !TryMovePlan(localPlans, plans, "ShareHexItems", out failure)
+                || !TryMovePlan(localPlans, plans, "ShareNTormatPages", out failure)
                 || !TryMovePlan(localPlans, plans, "PersonalMarkersEnabled", out failure)
+                || !TryMovePlan(localPlans, plans, "HideMarkersInTrials", out failure)
+                || !TryMovePlan(localPlans, plans, "AutomaticMarkerDeclutter", out failure)
+                || !TryMovePlan(localPlans, plans, "MaxVisibleMarkerCards", out failure)
                 || !TryMovePlan(localPlans, plans, "MarkerPresentationMode", out failure)
                 || !TryMovePlan(localPlans, plans, "ShowMarkerDistance", out failure)
                 || !TryMovePlan(localPlans, plans, "MarkerScale", out failure)
@@ -764,6 +776,9 @@ namespace ItemShareFix
         {
             var key = entry.Definition.Key;
             if (string.Equals(key, "ShareTemporaryItems", StringComparison.Ordinal)) return SharingCategory;
+            if (string.Equals(key, "ShareHallowedItems", StringComparison.Ordinal)
+                || string.Equals(key, "ShareHexItems", StringComparison.Ordinal)
+                || string.Equals(key, "ShareNTormatPages", StringComparison.Ordinal)) return ItemTiersCategory;
             if (key.EndsWith("Color", StringComparison.Ordinal) || string.Equals(entry.Definition.Section, "Marker Colors", StringComparison.Ordinal)) return MarkerColorsCategory;
             if (string.Equals(key, "EnableOffscreenIndicators", StringComparison.Ordinal)
                 || string.Equals(key, "ShowOffscreenDistance", StringComparison.Ordinal)
@@ -786,8 +801,14 @@ namespace ItemShareFix
             switch (key)
             {
                 case "PersonalMarkersEnabled": return "Enable Markers";
+                case "HideMarkersInTrials": return "Hide Markers in Trials";
+                case "AutomaticMarkerDeclutter": return "Automatic Decluttering";
+                case "MaxVisibleMarkerCards": return "On-screen Card Limit";
                 case "MarkerPresentationMode": return "Marker Mode";
                 case "ShareTemporaryItems": return "Share Temporary Items";
+                case "ShareHallowedItems": return "Hallowed";
+                case "ShareHexItems": return "Hex";
+                case "ShareNTormatPages": return "N'Tormat Pages";
                 case "ShowMarkerDistance": return "Show Distance";
                 case "MarkerScale": return "Marker Scale";
                 case "MarkerOpacity": return "Marker Opacity";

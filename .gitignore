@@ -1,0 +1,30 @@
+# Build output
+**/bin/
+**/obj/
+artifacts/
+
+# Visual Studio / IDE
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test output
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# Runtime / local evidence
+*.log
+logs/
+evidence/
+
+# Packages / internal handoffs
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db

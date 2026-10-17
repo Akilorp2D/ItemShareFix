@@ -319,7 +319,7 @@ namespace ItemShareFix.Core
         public const int MarkerDetailRowsDefault = 5;
         public const int DetailedCompositionLineCharacterBudget = 48;
         public const int MaxCompositionLines = 2;
-        public const int MaxCompactCategoryBadges = 11;
+        public const int MaxCompactCategoryBadges = 14;
         public const int MaxCompactLifetimePresentationGroups = MaxCompactCategoryBadges * 2;
         public const float DetailedItemLabelMaxWidth1080 = 420f;
         public const float DetailedItemLabelMinWidth1080 = 180f;
@@ -953,22 +953,6 @@ namespace ItemShareFix.Core
                 cluster.UnknownLifetimeMemberCount,
                 allowCount,
                 showSingleCountWhenMixed);
-
-        private static void AppendLifetimeSummary(
-            StringBuilder builder,
-            MarkerSemanticCluster cluster,
-            bool showTemporaryCount,
-            bool russian)
-        {
-            var line = MarkerLifetimePolicy.BuildSummaryLine(
-                cluster.LifetimeSummary,
-                cluster.TemporaryPhysicalMemberCount,
-                showTemporaryCount,
-                russian);
-            if (string.IsNullOrEmpty(line)) return;
-            if (builder.Length > 0) builder.Append('\n');
-            builder.Append(line);
-        }
 
         private static void AppendDistance(StringBuilder builder, bool showDistance, int distanceMeters, MarkerLanguage language)
         {

@@ -1,0 +1,802 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using BepInEx.Logging;
+using ItemShareFix.Core;
+using RoR2;
+using UnityEngine.Networking;
+
+namespace ItemShareFix
+{
+    internal sealed class UpstreamBridge
+    {
+        internal sealed class CommandChoiceSnapshot
+        {
+            internal static readonly CommandChoiceSnapshot Empty = new CommandChoiceSnapshot(
+                Array.Empty<PickupIndex>(),
+                CommandOptionSourcePolicy.UnresolvedSourceToken,
+                exactSource: false,
+                sourceDisagreement: false,
+                MarkerLifetimeKind.Unknown,
+                exactNestedAvailableOptionCount: 0,
+                unresolvedAvailableOptionCount: 0,
+                availableOptionCount: 0);
+
+            internal CommandChoiceSnapshot(
+                PickupIndex[] pickupIndexes,
+                string optionSource,
+                bool exactSource,
+                bool sourceDisagreement,
+                MarkerLifetimeKind lifetime,
+                int exactNestedAvailableOptionCount,
+                int unresolvedAvailableOptionCount,
+                int availableOptionCount)
+            {
+                PickupIndexes = pickupIndexes;
+                OptionSource = optionSource;
+                ExactSource = exactSource;
+                SourceDisagreement = sourceDisagreement;
+                Lifetime = lifetime;
+                ExactNestedAvailableOptionCount = exactNestedAvailableOptionCount;
+                UnresolvedAvailableOptionCount = unresolvedAvailableOptionCount;
+                AvailableOptionCount = availableOptionCount;
+            }
+
+            internal PickupIndex[] PickupIndexes { get; }
+            internal string OptionSource { get; }
+            internal bool ExactSource { get; }
+            internal bool SourceDisagreement { get; }
+            internal MarkerLifetimeKind Lifetime { get; }
+            internal int ExactNestedAvailableOptionCount { get; }
+            internal int UnresolvedAvailableOptionCount { get; }
+            internal int AvailableOptionCount { get; }
+            internal bool HasResolvedPickupIndexes => PickupIndexes.Length > 0;
+            internal bool HasAvailableOptions => AvailableOptionCount > 0;
+        }
+
+        private sealed class CommandOptionAccessor
+        {
+            internal CommandOptionAccessor(MemberInfo? available, MemberInfo? pickup, MemberInfo? directPickupIndex)
+            {
+                Available = available;
+                Pickup = pickup;
+                DirectPickupIndex = directPickupIndex;
+            }
+
+            internal MemberInfo? Available { get; }
+            internal MemberInfo? Pickup { get; }
+            internal MemberInfo? DirectPickupIndex { get; }
+        }
+
+        private static readonly object ReflectionCacheGate = new object();
+        private static readonly Dictionary<Type, Dictionary<string, MemberInfo?>> ReadMemberCache =
+            new Dictionary<Type, Dictionary<string, MemberInfo?>>();
+        private static readonly Dictionary<Type, CommandOptionAccessor> CommandOptionAccessorCache =
+            new Dictionary<Type, CommandOptionAccessor>();
+        private static readonly Dictionary<Type, MethodInfo?> ClaimAddMethodCache =
+            new Dictionary<Type, MethodInfo?>();
+        private static readonly Dictionary<Type, PropertyInfo?> ConfigValuePropertyCache =
+            new Dictionary<Type, PropertyInfo?>();
+
+        private readonly ManualLogSource _log;
+        private readonly FieldInfo _claimsField;
+        private readonly FieldInfo _choicesField;
+        private readonly FieldInfo _modeField;
+        private readonly FieldInfo _hideCollectedField;
+        private readonly FieldInfo _shareCommandPicksField;
+        private readonly FieldInfo _clientOrbsField;
+        private readonly FieldInfo _clientCubesField;
+        private readonly MethodInfo _clientContainsMethod;
+        private readonly MethodInfo _isCommandCubeMethod;
+        private readonly MethodInfo _hasPickerStateMethod;
+        private readonly FieldInfo _pickerOptionsField;
+        private readonly MethodInfo _isShareableMethod;
+        private readonly MethodInfo _giveDirectMethod;
+        private readonly MethodInfo _broadcastOrbStateMethod;
+        private readonly MethodInfo _applyOrbVisibilityMethod;
+
+        public UpstreamBridge(Assembly itemShareAssembly, Assembly pickupShareApiAssembly, ManualLogSource log)
+        {
+            _log = log;
+            var itemSharePluginType = itemShareAssembly.GetType("ItemShare.ItemSharePlugin", true)!;
+            _claimsField = RequiredField(itemSharePluginType, "Claims");
+            _choicesField = RequiredField(itemSharePluginType, "Choices");
+            _modeField = RequiredField(itemSharePluginType, "_mode");
+            _hideCollectedField = RequiredField(itemSharePluginType, "_hideCollectedOrbs");
+            _shareCommandPicksField = RequiredField(itemSharePluginType, "_shareCommandPicks");
+            _isShareableMethod = RequiredMethod(itemSharePluginType, "IsShareable", 1);
+            _giveDirectMethod = RequiredMethod(itemSharePluginType, "GiveDirect", 3);
+            _broadcastOrbStateMethod = RequiredMethod(itemSharePluginType, "BroadcastOrbState", 2);
+            _applyOrbVisibilityMethod = RequiredMethod(itemSharePluginType, "ApplyOrbVisibility", 2);
+
+            var mirrorType = itemShareAssembly.GetType("ItemShare.ClientPickMirror", true)!;
+            _clientOrbsField = RequiredField(mirrorType, "Orbs");
+            _clientCubesField = RequiredField(mirrorType, "Cubes");
+            var record = _clientOrbsField.GetValue(null) ?? throw new InvalidOperationException("ItemShare ClientPickMirror.Orbs is null.");
+            _clientContainsMethod = record.GetType().GetMethod(
+                "Contains",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                types: new[] { typeof(uint), typeof(uint) },
+                modifiers: null)
+                ?? throw new MissingMethodException(record.GetType().FullName, "Contains(uint,uint)");
+            if (_clientContainsMethod.ReturnType != typeof(bool)) throw new InvalidOperationException("Unexpected ItemShare PickRecord.Contains return type.");
+            var cubeRecord = _clientCubesField.GetValue(null) ?? throw new InvalidOperationException("ItemShare ClientPickMirror.Cubes is null.");
+            if (cubeRecord.GetType() != record.GetType()) throw new InvalidOperationException("ItemShare cube/orb mirror record types differ unexpectedly.");
+
+            var classifierType = pickupShareApiAssembly.GetType("PickupShare.PickupClassifier", true)!;
+            _isCommandCubeMethod = RequiredStaticMethod(classifierType, "IsCommandCube", typeof(bool), typeof(PickupPickerController));
+            var apiType = pickupShareApiAssembly.GetType("PickupShare.PickupShareApi", true)!;
+            _hasPickerStateMethod = RequiredStaticMethod(apiType, "HasPickerState", typeof(bool), typeof(int));
+            _pickerOptionsField = RequiredField(typeof(PickupPickerController), "options");
+        }
+
+        public bool IsIndividualMode => string.Equals(ReadConfigValue(_modeField)?.ToString(), "Individual", StringComparison.OrdinalIgnoreCase);
+        public bool HideCollectedOrbsEnabled => ReadConfigBool(_hideCollectedField);
+        public bool ShareCommandPicksEnabled => ReadConfigBool(_shareCommandPicksField);
+
+
+        public bool IsCommandCube(PickupPickerController picker)
+        {
+            if (picker == null) return false;
+            try { return (bool)_isCommandCubeMethod.Invoke(null, new object[] { picker }); }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[ItemShareFix] PickupClassifier.IsCommandCube failed closed: " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        public bool HasPickerProviderState(PickupPickerController picker)
+        {
+            if (picker == null) return false;
+            try { return (bool)_hasPickerStateMethod.Invoke(null, new object[] { picker.GetInstanceID() }); }
+            catch (Exception ex)
+            {
+                _log.LogDebug("[ItemShareFix] PickupShareApi.HasPickerState diagnostic query failed: " + ex.GetType().Name);
+                return false;
+            }
+        }
+
+        public bool TryHasCommandPicked(PickupPickerController picker, CharacterMaster master, out bool picked)
+        {
+            picked = false;
+            if (picker == null || master == null || !IsIndividualMode || !ShareCommandPicksEnabled || !IsCommandCube(picker)) return false;
+
+            if (NetworkServer.active)
+            {
+                var choices = _choicesField.GetValue(null) as IDictionary;
+                if (choices == null) return false;
+                var instanceId = picker.GetInstanceID();
+                if (!choices.Contains(instanceId))
+                {
+                    picked = false; // untouched Command cube: every current participant is still pending.
+                    return true;
+                }
+
+                var chosen = choices[instanceId];
+                if (chosen == null) return false;
+                picked = ServerClaimSetContains(chosen, master);
+                return true;
+            }
+
+            var pickerNetId = picker.netId.Value;
+            var masterNetId = master.netId.Value;
+            if (pickerNetId == 0u || masterNetId == 0u) return false;
+            picked = ClientMirrorContains(_clientCubesField, pickerNetId, masterNetId);
+            return true;
+        }
+
+
+        public bool TryBuildCommandChoiceSnapshot(
+            PickupPickerController picker,
+            out CommandChoiceSnapshot snapshot)
+        {
+            var profileActive = CommandOptionResolutionDiagnostics.CaptureActive;
+            var profileSnapshotStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            var profilePreflightStarted = profileSnapshotStarted;
+            var profilePreflightTicks = 0L;
+            var profileOptionEnumerationMemberResolutionTicks = 0L;
+            var profilePickupIndexSourceResolutionTicks = 0L;
+            var profileDedupFinalizationTicks = 0L;
+            var profileOptionsVisited = 0;
+            var profileDuplicatePickupCount = 0;
+            var profileLoopStarted = 0L;
+            var profilePreflightComplete = false;
+
+            snapshot = CommandChoiceSnapshot.Empty;
+            if (picker == null || !IsCommandCube(picker))
+            {
+                if (profileActive)
+                {
+                    var profileCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    profilePreflightTicks = profileCompleted - profilePreflightStarted;
+                    CommandOptionResolutionDiagnostics.RecordSnapshot(
+                        profileCompleted - profileSnapshotStarted,
+                        profilePreflightTicks,
+                        profileOptionEnumerationMemberResolutionTicks,
+                        profilePickupIndexSourceResolutionTicks,
+                        profileDedupFinalizationTicks,
+                        profileOptionsVisited,
+                        availableOptions: 0,
+                        resolvedPickupIndexes: 0,
+                        exactNestedAvailable: 0,
+                        unresolvedAvailable: 0,
+                        duplicatePickupCount: profileDuplicatePickupCount);
+                }
+                return false;
+            }
+
+            try
+            {
+                if (_pickerOptionsField.GetValue(picker) is not IEnumerable options)
+                {
+                    if (profileActive)
+                    {
+                        var profileCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                        profilePreflightTicks = profileCompleted - profilePreflightStarted;
+                        profilePreflightComplete = true;
+                        CommandOptionResolutionDiagnostics.RecordSnapshot(
+                            profileCompleted - profileSnapshotStarted,
+                            profilePreflightTicks,
+                            profileOptionEnumerationMemberResolutionTicks,
+                            profilePickupIndexSourceResolutionTicks,
+                            profileDedupFinalizationTicks,
+                            profileOptionsVisited,
+                            availableOptions: 0,
+                            resolvedPickupIndexes: 0,
+                            exactNestedAvailable: 0,
+                            unresolvedAvailable: 0,
+                            duplicatePickupCount: profileDuplicatePickupCount);
+                    }
+                    return false;
+                }
+
+                var result = new List<PickupIndex>();
+                var sawNested = false;
+                var sawFallback = false;
+                var sourceDisagreement = false;
+                var sawTemporary = false;
+                var sawPermanent = false;
+                var exactNestedAvailableOptionCount = 0;
+                var unresolvedAvailableOptionCount = 0;
+                var availableOptionCount = 0;
+                var uniquePickupIndexMember = GetCachedReadableMember(typeof(UniquePickup), "pickupIndex");
+                if (profileActive)
+                {
+                    var profilePreflightCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    profilePreflightTicks = profilePreflightCompleted - profilePreflightStarted;
+                    profilePreflightComplete = true;
+                    profileLoopStarted = profilePreflightCompleted;
+                }
+
+                foreach (var boxedOption in options)
+                {
+                    if (profileActive) profileOptionsVisited++;
+                    if (boxedOption == null) continue;
+                    var accessor = GetCachedCommandOptionAccessor(boxedOption.GetType());
+                    if (!TryReadBoolMember(boxedOption, accessor.Available, out var available) || !available) continue;
+
+                    availableOptionCount++;
+                    object? nestedPickupObject = null;
+                    if (TryReadMember(boxedOption, accessor.Pickup, out nestedPickupObject)
+                        && nestedPickupObject is UniquePickup exactNestedPickup)
+                    {
+                        exactNestedAvailableOptionCount++;
+                        if (exactNestedPickup.isTempItem) sawTemporary = true;
+                        else sawPermanent = true;
+                    }
+                    else
+                    {
+                        unresolvedAvailableOptionCount++;
+                    }
+
+                    var profileSourceStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                    var resolvedPickup = TryReadPickupIndex(
+                            boxedOption,
+                            accessor,
+                            nestedPickupObject,
+                            uniquePickupIndexMember,
+                            out var pickupIndex,
+                            out var source,
+                            out var disagreement);
+                    if (profileActive) profilePickupIndexSourceResolutionTicks += System.Diagnostics.Stopwatch.GetTimestamp() - profileSourceStarted;
+                    if (!resolvedPickup || pickupIndex == PickupIndex.none) continue;
+
+                    var profileDedupStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                    sourceDisagreement |= disagreement;
+                    if (source == CommandOptionPickupSource.NestedPickup) sawNested = true;
+                    if (source == CommandOptionPickupSource.DirectCompatibilityFallback) sawFallback = true;
+                    var duplicate = false;
+                    for (var i = 0; i < result.Count; i++)
+                    {
+                        if (result[i] != pickupIndex) continue;
+                        duplicate = true;
+                        break;
+                    }
+                    if (!duplicate) result.Add(pickupIndex);
+                    else if (profileActive) profileDuplicatePickupCount++;
+                    if (profileActive) profileDedupFinalizationTicks += System.Diagnostics.Stopwatch.GetTimestamp() - profileDedupStarted;
+                }
+
+                var profileLoopCompleted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                if (profileActive)
+                {
+                    var profileLoopTicks = profileLoopCompleted - profileLoopStarted;
+                    profileOptionEnumerationMemberResolutionTicks = profileLoopTicks
+                        - profilePickupIndexSourceResolutionTicks
+                        - profileDedupFinalizationTicks;
+                    if (profileOptionEnumerationMemberResolutionTicks < 0L) profileOptionEnumerationMemberResolutionTicks = 0L;
+                }
+
+                var profileFinalizationStarted = profileLoopCompleted;
+                var lifetime = availableOptionCount == 0 || unresolvedAvailableOptionCount > 0
+                    ? MarkerLifetimeKind.Unknown
+                    : MarkerLifetimePolicy.FromExactOptionKinds(sawTemporary, sawPermanent);
+                var optionSource = result.Count == 0
+                    ? CommandOptionSourcePolicy.UnresolvedSourceToken
+                    : sawFallback
+                        ? (sawNested ? "nested-pickup+direct-fallback" : CommandOptionSourcePolicy.FallbackSourceToken)
+                        : CommandOptionSourcePolicy.AuthoritativeSourceToken;
+
+                snapshot = new CommandChoiceSnapshot(
+                    result.ToArray(),
+                    optionSource,
+                    exactSource: result.Count > 0 && sawNested && !sawFallback,
+                    sourceDisagreement,
+                    lifetime,
+                    exactNestedAvailableOptionCount,
+                    unresolvedAvailableOptionCount,
+                    availableOptionCount);
+                if (profileActive)
+                {
+                    var profileCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    profileDedupFinalizationTicks += profileCompleted - profileFinalizationStarted;
+                    CommandOptionResolutionDiagnostics.RecordSnapshot(
+                        profileCompleted - profileSnapshotStarted,
+                        profilePreflightTicks,
+                        profileOptionEnumerationMemberResolutionTicks,
+                        profilePickupIndexSourceResolutionTicks,
+                        profileDedupFinalizationTicks,
+                        profileOptionsVisited,
+                        availableOptionCount,
+                        result.Count,
+                        exactNestedAvailableOptionCount,
+                        unresolvedAvailableOptionCount,
+                        profileDuplicatePickupCount);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (profileActive)
+                {
+                    var profileCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (!profilePreflightComplete)
+                    {
+                        profilePreflightTicks = profileCompleted - profilePreflightStarted;
+                    }
+                    else if (profileLoopStarted > 0L)
+                    {
+                        profileOptionEnumerationMemberResolutionTicks = profileCompleted - profileLoopStarted
+                            - profilePickupIndexSourceResolutionTicks
+                            - profileDedupFinalizationTicks;
+                        if (profileOptionEnumerationMemberResolutionTicks < 0L) profileOptionEnumerationMemberResolutionTicks = 0L;
+                    }
+                    CommandOptionResolutionDiagnostics.RecordSnapshot(
+                        profileCompleted - profileSnapshotStarted,
+                        profilePreflightTicks,
+                        profileOptionEnumerationMemberResolutionTicks,
+                        profilePickupIndexSourceResolutionTicks,
+                        profileDedupFinalizationTicks,
+                        profileOptionsVisited,
+                        snapshot.AvailableOptionCount,
+                        snapshot.PickupIndexes.Length,
+                        snapshot.ExactNestedAvailableOptionCount,
+                        snapshot.UnresolvedAvailableOptionCount,
+                        profileDuplicatePickupCount);
+                }
+                _log.LogDebug("[ItemShareFix] Command picker option snapshot read failed: " + ex.GetType().Name);
+                snapshot = CommandChoiceSnapshot.Empty;
+                return false;
+            }
+        }
+
+        public bool TryGetCommandChoicePickupIndexes(
+            PickupPickerController picker,
+            out PickupIndex[] pickupIndexes,
+            out string optionSource,
+            out bool exactSource,
+            out bool sourceDisagreement)
+        {
+            pickupIndexes = Array.Empty<PickupIndex>();
+            optionSource = CommandOptionSourcePolicy.UnresolvedSourceToken;
+            exactSource = false;
+            sourceDisagreement = false;
+            if (!TryBuildCommandChoiceSnapshot(picker, out var snapshot) || !snapshot.HasResolvedPickupIndexes) return false;
+            pickupIndexes = snapshot.PickupIndexes;
+            optionSource = snapshot.OptionSource;
+            exactSource = snapshot.ExactSource;
+            sourceDisagreement = snapshot.SourceDisagreement;
+            return true;
+        }
+
+        public bool TryGetCommandChoiceLifetime(
+            PickupPickerController picker,
+            out MarkerLifetimeKind lifetime,
+            out int exactNestedAvailableOptionCount,
+            out int unresolvedAvailableOptionCount)
+        {
+            lifetime = MarkerLifetimeKind.Unknown;
+            exactNestedAvailableOptionCount = 0;
+            unresolvedAvailableOptionCount = 0;
+            if (!TryBuildCommandChoiceSnapshot(picker, out var snapshot) || !snapshot.HasAvailableOptions) return false;
+            lifetime = snapshot.Lifetime;
+            exactNestedAvailableOptionCount = snapshot.ExactNestedAvailableOptionCount;
+            unresolvedAvailableOptionCount = snapshot.UnresolvedAvailableOptionCount;
+            return true;
+        }
+
+        private static bool TryReadPickupIndex(
+            object boxedOption,
+            CommandOptionAccessor accessor,
+            object? nestedPickupObject,
+            MemberInfo? uniquePickupIndexMember,
+            out PickupIndex pickupIndex,
+            out CommandOptionPickupSource source,
+            out bool disagreement)
+        {
+            pickupIndex = PickupIndex.none;
+            source = CommandOptionPickupSource.None;
+            disagreement = false;
+
+            var nestedAvailable = false;
+            var nestedIndex = PickupIndex.none;
+            if (nestedPickupObject != null
+                && TryReadMember(nestedPickupObject, uniquePickupIndexMember, out var nested)
+                && nested is PickupIndex exactNestedIndex)
+            {
+                nestedAvailable = true;
+                nestedIndex = exactNestedIndex;
+            }
+
+            var directAvailable = false;
+            var directIndex = PickupIndex.none;
+            if (TryReadMember(boxedOption, accessor.DirectPickupIndex, out var direct)
+                && direct is PickupIndex exactDirectIndex)
+            {
+                directAvailable = true;
+                directIndex = exactDirectIndex;
+            }
+
+            var decision = CommandOptionSourcePolicy.Resolve(
+                nestedAvailable,
+                nestedIndex,
+                directAvailable,
+                directIndex);
+            if (!decision.HasValue) return false;
+
+            pickupIndex = decision.Value;
+            source = decision.Source;
+            disagreement = decision.Disagreement;
+            return true;
+        }
+
+        private static bool TryReadBoolMember(object instance, MemberInfo? member, out bool value)
+        {
+            value = false;
+            if (!TryReadMember(instance, member, out var boxed) || boxed is not bool flag) return false;
+            value = flag;
+            return true;
+        }
+
+        private static bool TryReadMember(object instance, MemberInfo? member, out object? value)
+        {
+            value = null;
+            if (member is FieldInfo field)
+            {
+                value = field.GetValue(instance);
+                return true;
+            }
+
+            if (member is PropertyInfo property)
+            {
+                value = property.GetValue(instance);
+                return true;
+            }
+            return false;
+        }
+
+        private static CommandOptionAccessor GetCachedCommandOptionAccessor(Type type)
+        {
+            lock (ReflectionCacheGate)
+            {
+                if (CommandOptionAccessorCache.TryGetValue(type, out var cached)) return cached;
+                cached = new CommandOptionAccessor(
+                    GetCachedReadableMemberLocked(type, "available"),
+                    GetCachedReadableMemberLocked(type, "pickup"),
+                    GetCachedReadableMemberLocked(type, "pickupIndex"));
+                CommandOptionAccessorCache[type] = cached;
+                return cached;
+            }
+        }
+
+        private static MemberInfo? GetCachedReadableMember(Type type, string name)
+        {
+            lock (ReflectionCacheGate)
+                return GetCachedReadableMemberLocked(type, name);
+        }
+
+        private static MemberInfo? GetCachedReadableMemberLocked(Type type, string name)
+        {
+            if (!ReadMemberCache.TryGetValue(type, out var byName))
+            {
+                byName = new Dictionary<string, MemberInfo?>(StringComparer.Ordinal);
+                ReadMemberCache[type] = byName;
+            }
+            if (byName.TryGetValue(name, out var cached)) return cached;
+
+            MemberInfo? resolved = type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (resolved == null)
+            {
+                var property = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (property != null && property.GetIndexParameters().Length == 0) resolved = property;
+            }
+            byName[name] = resolved;
+            return resolved;
+        }
+
+        public bool IsShareable(GenericPickupController pickup)
+        {
+            if (pickup == null) return false;
+            var def = PickupCatalog.GetPickupDef(pickup.pickup.pickupIndex);
+            return def != null && IsShareable(def);
+        }
+
+        public bool IsShareable(PickupDef def)
+            => TryIsShareable(def, out var shareable) && shareable;
+
+        public bool TryIsShareable(PickupDef def, out bool shareable)
+        {
+            shareable = false;
+            if (def == null) return false;
+            try
+            {
+                var result = _isShareableMethod.Invoke(null, new object[] { def });
+                if (result is not bool exact) return false;
+                shareable = exact;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _log.LogError("[ItemShareFix] ItemShare IsShareable(PickupDef) reflection failed: " + ex);
+                return false;
+            }
+        }
+
+        public bool HasCollected(GenericPickupController pickup, CharacterMaster master)
+        {
+            if (pickup == null || master == null) return false;
+            if (NetworkServer.active) return ServerClaimsContains(pickup.GetInstanceID(), master);
+
+            var dropNetId = pickup.netId.Value;
+            var masterNetId = master.netId.Value;
+            if (dropNetId == 0u || masterNetId == 0u) return false;
+            return ClientMirrorContains(dropNetId, masterNetId);
+        }
+
+        public void NormalizeUpstreamVisualSubtree(GenericPickupController pickup)
+        {
+            if (pickup == null || pickup.pickupDisplay == null) return;
+            try { _applyOrbVisibilityMethod.Invoke(null, new object[] { pickup, true }); }
+            catch (Exception ex) { _log.LogDebug("[ItemShareFix] upstream visual normalization failed: " + ex.GetType().Name); }
+        }
+
+        public bool GiveDeferred(Inventory inventory, PickupDef pickupDef, object boxedUniquePickup)
+        {
+            var result = _giveDirectMethod.Invoke(null, new[] { (object)inventory, pickupDef, boxedUniquePickup });
+            return result is bool granted && granted;
+        }
+
+        public bool TryMirrorHistoricalBarrier(int pickupInstanceId, CharacterMaster master, out string evidence)
+        {
+            evidence = string.Empty;
+            if (!NetworkServer.active || master == null || master.netId.Value == 0u)
+            {
+                evidence = "server/master unavailable";
+                return false;
+            }
+
+            var claims = _claimsField.GetValue(null) as IDictionary;
+            if (claims == null || !claims.Contains(pickupInstanceId))
+            {
+                evidence = "ItemShare Claims has no authoritative entry for historical pickup " + pickupInstanceId;
+                return false;
+            }
+
+            var claimSet = claims[pickupInstanceId];
+            if (claimSet == null)
+            {
+                evidence = "ItemShare claim set is null for historical pickup " + pickupInstanceId;
+                return false;
+            }
+
+            var alreadyPresent = ServerClaimSetContains(claimSet, master);
+            var addMethod = GetCachedClaimAddMethod(claimSet.GetType());
+            if (addMethod == null)
+            {
+                evidence = "ItemShare claim set has no Add(CharacterMaster)";
+                return false;
+            }
+
+            try
+            {
+                if (!alreadyPresent)
+                {
+                    var result = addMethod.Invoke(claimSet, new object[] { master });
+                    if (result is bool changed && !changed && !ServerClaimSetContains(claimSet, master))
+                    {
+                        evidence = "ItemShare claim set rejected reconnect generation";
+                        return false;
+                    }
+                }
+
+                var pickup = FindPickupByInstanceId(pickupInstanceId);
+                if (pickup == null || pickup.netId.Value == 0u)
+                {
+                    evidence = "historical barrier is present server-side; client rebroadcast is pending because pickup/netId is unavailable";
+                    return false;
+                }
+
+                _broadcastOrbStateMethod.Invoke(null, new[] { (object)pickup, claimSet });
+                evidence = alreadyPresent
+                    ? "historical barrier already present in ItemShare Claims and was rebroadcast"
+                    : "historical barrier mirrored into ItemShare Claims and rebroadcast";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                evidence = "historical barrier mirror failed: " + ex.GetType().Name + ": " + ex.Message;
+                _log.LogWarning("[ItemShareFix] " + evidence);
+                return false;
+            }
+        }
+
+        public bool TryBroadcastTransferredOrbState(int newInstanceId)
+        {
+            if (!NetworkServer.active) return false;
+            var pickup = FindPickupByInstanceId(newInstanceId);
+            if (pickup == null || pickup.netId.Value == 0u) return false;
+
+            var claims = _claimsField.GetValue(null) as IDictionary;
+            if (claims == null) return false;
+            if (!claims.Contains(newInstanceId)) return true; // Provider had no claim set to mirror; nothing to rebroadcast.
+            var claimSet = claims[newInstanceId];
+            if (claimSet == null) return false;
+
+            try
+            {
+                _broadcastOrbStateMethod.Invoke(null, new[] { (object)pickup, claimSet });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[ItemShareFix] transferred-orb state rebroadcast failed: " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        public static GenericPickupController? FindPickupByInstanceId(int instanceId)
+        {
+            foreach (var pickup in InstanceTracker.GetInstancesList<GenericPickupController>())
+            {
+                if (pickup != null && pickup.GetInstanceID() == instanceId) return pickup;
+            }
+            return null;
+        }
+
+        private bool ServerClaimsContains(int pickupInstanceId, CharacterMaster master)
+        {
+            var claims = _claimsField.GetValue(null) as IDictionary;
+            if (claims == null || !claims.Contains(pickupInstanceId)) return false;
+            var claimSet = claims[pickupInstanceId];
+            return claimSet != null && ServerClaimSetContains(claimSet, master);
+        }
+
+        private static bool ServerClaimSetContains(object claimSet, CharacterMaster master)
+        {
+            if (claimSet is not IEnumerable enumerable) return false;
+            foreach (var value in enumerable)
+            {
+                if (ReferenceEquals(value, master)) return true;
+            }
+            return false;
+        }
+
+        private bool ClientMirrorContains(uint pickupNetId, uint masterNetId)
+            => ClientMirrorContains(_clientOrbsField, pickupNetId, masterNetId);
+
+        private bool ClientMirrorContains(FieldInfo mirrorField, uint pickupNetId, uint masterNetId)
+        {
+            try
+            {
+                var record = mirrorField.GetValue(null);
+                if (record == null) return false;
+                return (bool)_clientContainsMethod.Invoke(record, new object[] { pickupNetId, masterNetId });
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning("[ItemShareFix] client mirror query failed: " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        private static MethodInfo? GetCachedClaimAddMethod(Type type)
+        {
+            lock (ReflectionCacheGate)
+            {
+                if (ClaimAddMethodCache.TryGetValue(type, out var cached)) return cached;
+                cached = type.GetMethod(
+                    "Add",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    binder: null,
+                    types: new[] { typeof(CharacterMaster) },
+                    modifiers: null);
+                ClaimAddMethodCache[type] = cached;
+                return cached;
+            }
+        }
+
+        private static PropertyInfo? GetCachedConfigValueProperty(Type type)
+        {
+            lock (ReflectionCacheGate)
+            {
+                if (ConfigValuePropertyCache.TryGetValue(type, out var cached)) return cached;
+                cached = type.GetProperty("Value", BindingFlags.Instance | BindingFlags.Public);
+                ConfigValuePropertyCache[type] = cached;
+                return cached;
+            }
+        }
+
+        private static FieldInfo RequiredField(Type type, string name)
+            => type.GetField(name, BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+               ?? throw new MissingFieldException(type.FullName, name);
+
+        private static MethodInfo RequiredMethod(Type type, string name, int parameterCount)
+        {
+            MethodInfo? match = null;
+            var methods = type.GetMethods(BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            for (var i = 0; i < methods.Length; i++)
+            {
+                var candidate = methods[i];
+                if (!string.Equals(candidate.Name, name, StringComparison.Ordinal)
+                    || candidate.GetParameters().Length != parameterCount)
+                    continue;
+                if (match != null) throw new MissingMethodException(type.FullName, name + " with " + parameterCount + " parameters");
+                match = candidate;
+            }
+            return match ?? throw new MissingMethodException(type.FullName, name + " with " + parameterCount + " parameters");
+        }
+
+        private static MethodInfo RequiredStaticMethod(Type type, string name, Type returnType, params Type[] parameterTypes)
+        {
+            var method = type.GetMethod(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, null, parameterTypes, null);
+            if (method == null || method.ReturnType != returnType) throw new MissingMethodException(type.FullName, name);
+            return method;
+        }
+
+        private static object? ReadConfigValue(FieldInfo field)
+        {
+            var entry = field.GetValue(null);
+            if (entry == null) return null;
+            return GetCachedConfigValueProperty(entry.GetType())?.GetValue(entry);
+        }
+
+        private static bool ReadConfigBool(FieldInfo field)
+        {
+            var value = ReadConfigValue(field);
+            return value is bool flag && flag;
+        }
+    }
+}

@@ -5,7 +5,7 @@
     <RootNamespace>ItemShareFix</RootNamespace>
     <RiskOfRain2Dir Condition="'$(RiskOfRain2Dir)' == ''">$(ROR2_GAME_DIR)</RiskOfRain2Dir>
     <ManagedDir>$(RiskOfRain2Dir)/Risk of Rain 2_Data/Managed</ManagedDir>
-    <BepInExCoreDir>$(RiskOfRain2Dir)/BepInEx/core</BepInExCoreDir>
+    <BepInExCoreDir Condition="'$(BepInExCoreDir)' == ''">$(RiskOfRain2Dir)/BepInEx/core</BepInExCoreDir>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../ItemShareFix.Core/ItemShareFix.Core.csproj" />

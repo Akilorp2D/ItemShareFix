@@ -131,9 +131,11 @@ namespace ItemShareFix
                                  ?? localUserManager.GetField("readOnlyLocalUsersList", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                 if (localUsers == null) return Fail("RoR2.LocalUserManager.readOnlyLocalUsersList shape missing; personal visibility cannot safely resolve local identity.");
                 var disconnect = FindDisconnectMethod(ror2Assembly);
-                if (disconnect == null) return Fail("No supported network-destroy observation callback shape was found (NetworkUser/PlayerCharacterMasterController OnNetworkDestroy). DisconnectCleanup must fail closed.");
+                var disconnectEvidence = disconnect != null
+                    ? disconnect.DeclaringType?.FullName + "." + disconnect.Name
+                    : "<none-declared>; authoritative PlayerCharacterMasterController.instances absence sweep remains the cleanup authority";
 
-                log.LogInfo("[ItemShareFix] compatibility guard PASS: exact ItemShare 1.7.1 + PickupShareApi 1.0.0 / API 1 + Command picker shapes; disconnect candidate hook=" + disconnect.DeclaringType?.FullName + "." + disconnect.Name);
+                log.LogInfo("[ItemShareFix] compatibility guard PASS: exact ItemShare 1.7.1 + PickupShareApi 1.0.0 / API 1 + Command picker shapes; disconnect candidate hook=" + disconnectEvidence);
                 return new CompatibilityResult
                 {
                     Supported = true,
@@ -220,8 +222,13 @@ namespace ItemShareFix
             foreach (var typeName in new[] { "RoR2.NetworkUser", "RoR2.PlayerCharacterMasterController" })
             {
                 var type = ror2Assembly.GetType(typeName, false);
-                var method = type?.GetMethod("OnNetworkDestroy", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (method != null && method.GetParameters().Length == 0) return method;
+                var method = type?.GetMethod(
+                    "OnNetworkDestroy",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly,
+                    binder: null,
+                    types: Type.EmptyTypes,
+                    modifiers: null);
+                if (method != null && method.DeclaringType == type) return method;
             }
             return null;
         }

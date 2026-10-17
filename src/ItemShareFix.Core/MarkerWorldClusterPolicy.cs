@@ -49,6 +49,9 @@ namespace ItemShareFix.Core
         Other,
         Unknown,
         CommandState,
+        Hallowed,
+        Hex,
+        Page,
     }
 
     public static class MarkerSemanticCategoryPolicy
@@ -69,6 +72,9 @@ namespace ItemShareFix.Core
                 case MarkerClassKind.Equipment: return MarkerSemanticCategory.Equipment;
                 case MarkerClassKind.LunarEquipment: return MarkerSemanticCategory.LunarEquipment;
                 case MarkerClassKind.Other: return MarkerSemanticCategory.Other;
+                case MarkerClassKind.Hallowed: return MarkerSemanticCategory.Hallowed;
+                case MarkerClassKind.Hex: return MarkerSemanticCategory.Hex;
+                case MarkerClassKind.Page: return MarkerSemanticCategory.Page;
                 default: return MarkerSemanticCategory.Unknown;
             }
         }
@@ -87,6 +93,9 @@ namespace ItemShareFix.Core
                 case MarkerSemanticCategory.LunarEquipment: return 7;
                 case MarkerSemanticCategory.Other: return 8;
                 case MarkerSemanticCategory.Unknown: return 9;
+                case MarkerSemanticCategory.Hallowed: return 11;
+                case MarkerSemanticCategory.Hex: return 12;
+                case MarkerSemanticCategory.Page: return 13;
                 default: return 10;
             }
         }

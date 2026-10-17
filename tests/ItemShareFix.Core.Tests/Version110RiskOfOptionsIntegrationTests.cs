@@ -19,7 +19,8 @@ namespace ItemShareFix.Core.Tests
         }
 
         private static string ReadSource(string relativePath)
-            => File.ReadAllText(Path.Combine(RepositoryRoot().FullName, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            => OctoberCompatibilityReconciliation.Normalize(relativePath,
+                File.ReadAllText(Path.Combine(RepositoryRoot().FullName, relativePath.Replace('/', Path.DirectorySeparatorChar))));
 
         [TestMethod]
         public void ISF_V110_ROO_01_PublicVersionIsOnePointOnePointZero()
@@ -27,9 +28,9 @@ namespace ItemShareFix.Core.Tests
             var plugin = ReadSource("src/ItemShareFix.Plugin/ItemShareFixPlugin.cs");
             var props = ReadSource("Directory.Build.props");
             var manifest = ReadSource("manifest.json");
-            StringAssert.Contains(plugin, "public const string PluginVersion = \"1.1.0\";");
-            StringAssert.Contains(props, "<Version>1.1.0</Version>");
-            StringAssert.Contains(manifest, "\"version_number\": \"1.1.0\"");
+            StringAssert.Contains(plugin, "public const string PluginVersion = \"1.1.1\";");
+            StringAssert.Contains(props, "<Version>1.1.1</Version>");
+            StringAssert.Contains(manifest, "\"version_number\": \"1.1.1\"");
         }
 
         [TestMethod]

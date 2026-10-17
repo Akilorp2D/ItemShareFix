@@ -22,7 +22,8 @@ namespace ItemShareFix.Core.Tests
             while (directory != null)
             {
                 var candidate = System.IO.Path.Combine(directory.FullName, "src", "ItemShareFix.Plugin", "MarkerRiskOfOptionsLocalization.cs");
-                if (System.IO.File.Exists(candidate)) return System.IO.File.ReadAllText(candidate);
+                if (System.IO.File.Exists(candidate)) return OctoberCompatibilityReconciliation.Normalize(
+                    "src/ItemShareFix.Plugin/MarkerRiskOfOptionsLocalization.cs", System.IO.File.ReadAllText(candidate));
                 directory = directory.Parent;
             }
             Assert.Fail("MarkerRiskOfOptionsLocalization.cs was not found while walking up from the MSTest base directory.");
@@ -35,7 +36,8 @@ namespace ItemShareFix.Core.Tests
             while (directory != null)
             {
                 var candidate = System.IO.Path.Combine(directory.FullName, "src", "ItemShareFix.Plugin", fileName);
-                if (System.IO.File.Exists(candidate)) return System.IO.File.ReadAllText(candidate);
+                if (System.IO.File.Exists(candidate)) return OctoberCompatibilityReconciliation.Normalize(
+                    "src/ItemShareFix.Plugin/" + fileName, System.IO.File.ReadAllText(candidate));
                 directory = directory.Parent;
             }
             Assert.Fail(fileName + " was not found while walking up from the MSTest base directory.");
@@ -2055,8 +2057,9 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C20_R4_06_COMMAND_COLLECTORS_RETAIN_SUPPORTDRONE_OUTSIDE_DISTRIBUTION()
         {
-            var inDistribution = false;
-            Assert.IsFalse(inDistribution);
+            var source = System.IO.File.ReadAllText(C2HistoricalFreezeReconciliation.ResolvePath("src/ItemShareFix.Plugin/ServerCoordinator.cs"));
+            var activeGate = C2HistoricalFreezeReconciliation.MethodBody(source, "public bool ShouldTreatAsActive(");
+            Assert.IsFalse(activeGate.Contains("InDistribution", StringComparison.Ordinal), "Support Drone correction must not depend on a distribution scope.");
             Assert.IsFalse(ItemShareActiveGatePolicy.CorrectIsDown(true, true, true, ParticipantState.SupportDrone));
             Assert.IsTrue(ItemShareActiveGatePolicy.CountsAsOutstandingCollector(true, ParticipantState.SupportDrone));
         }

@@ -325,6 +325,26 @@ namespace ItemShareFix.Core
             return false;
         }
 
+        // Screen grouping reuses the truthful category/item/lifetime aggregation without changing world membership.
+        public static MarkerDenseAreaPresentationNode BuildScreenNode(long ownerKey, IReadOnlyList<MarkerDenseAreaPresentationNode> nodes)
+        {
+            if (nodes == null) throw new ArgumentNullException(nameof(nodes));
+            var clusters = new List<MarkerSemanticCluster>(nodes.Count);
+            var physicalKeys = new List<long>();
+            var members = new HashSet<long>();
+            for (var i = 0; i < nodes.Count; i++)
+            {
+                var node = nodes[i] ?? throw new ArgumentException("Null screen node.", nameof(nodes));
+                clusters.Add(node.PresentationCluster);
+                for (var k = 0; k < node.PhysicalClusterKeys.Count; k++) physicalKeys.Add(node.PhysicalClusterKeys[k]);
+                for (var k = 0; k < node.MemberStableKeys.Count; k++)
+                    if (!members.Add(node.MemberStableKeys[k])) throw new ArgumentException("Overlapping screen nodes.", nameof(nodes));
+            }
+            physicalKeys.Sort();
+            return new MarkerDenseAreaPresentationNode(ownerKey, true, physicalKeys.ToArray(),
+                BuildSummaryCluster(ownerKey, clusters, CollectMemberKeys(clusters)));
+        }
+
         private static MarkerSemanticCluster BuildSummaryCluster(long ownerKey, IReadOnlyList<MarkerSemanticCluster> clusters, long[] memberKeys)
         {
             var compositionMap = new Dictionary<MarkerSemanticCategory, int>();

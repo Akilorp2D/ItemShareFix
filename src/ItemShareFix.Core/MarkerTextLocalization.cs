@@ -33,6 +33,9 @@ namespace ItemShareFix.Core
 
         private static readonly Dictionary<string, string[]> Text = new Dictionary<string, string[]>(StringComparer.Ordinal)
         {
+            ["dlc.hallowed"] = new[] { "Hallowed", "Sacrés", "Consacrati", "Geheiligte", "Sagrados", "神聖なアイテム", "거룩한 아이템", "Santificados", "Освящённые", "神圣物品", "Kutsal" },
+            ["dlc.hex"] = new[] { "Hex", "Maléfices", "Malefici", "Verhexungen", "Maldiciones", "ヘックス", "사술", "Maldições", "Проклятия", "诅咒", "Büyüler" },
+            ["dlc.pages"] = new[] { "N'Tormat Pages", "Pages de N'tormat", "Pagine del N'tormat", "N’tormat-Seiten", "Páginas del N'tormat", "ン・トーマットのページ", "은토맛 페이지", "Páginas do N'tormat", "Страницы Н'тормата", "恩托马特书页", "N'tormat Sayfaları" },
             ["readable.white"] = new[] { "White", "Blanc", "Bianco", "Weiß", "Blanco", "白", "흰색", "Branco", "Белый", "白色", "Beyaz" },
             ["readable.green"] = new[] { "Green", "Vert", "Verde", "Grün", "Verde", "緑", "초록", "Verde", "Зелёный", "绿色", "Yeşil" },
             ["readable.red"] = new[] { "Red", "Rouge", "Rosso", "Rot", "Rojo", "赤", "빨강", "Vermelho", "Красный", "红色", "Kırmızı" },
@@ -132,6 +135,9 @@ namespace ItemShareFix.Core
                 case MarkerClassKind.Void: return Get("readable.void", language);
                 case MarkerClassKind.Equipment: return Get("readable.equipment", language);
                 case MarkerClassKind.LunarEquipment: return Get("readable.lunar_equipment", language);
+                case MarkerClassKind.Hallowed: return Get("dlc.hallowed", language);
+                case MarkerClassKind.Hex: return Get("dlc.hex", language);
+                case MarkerClassKind.Page: return Get("dlc.pages", language);
                 default: return Get("readable.item_choice", language);
             }
         }
@@ -150,6 +156,9 @@ namespace ItemShareFix.Core
                 case MarkerSemanticCategory.LunarEquipment: return Get("plural.lunar_equipment", language);
                 case MarkerSemanticCategory.Other: return Get("plural.other_items", language);
                 case MarkerSemanticCategory.CommandState: return Get("plural.item_choice", language);
+                case MarkerSemanticCategory.Hallowed: return Get("dlc.hallowed", language);
+                case MarkerSemanticCategory.Hex: return Get("dlc.hex", language);
+                case MarkerSemanticCategory.Page: return Get("dlc.pages", language);
                 default: return Get("plural.unknown_items", language);
             }
         }
@@ -168,6 +177,9 @@ namespace ItemShareFix.Core
                 case MarkerSemanticCategory.LunarEquipment: return Get("composition.lunar_equipment", language);
                 case MarkerSemanticCategory.Other: return Get("composition.other", language);
                 case MarkerSemanticCategory.CommandState: return Get("composition.choice", language);
+                case MarkerSemanticCategory.Hallowed: return Get("dlc.hallowed", language);
+                case MarkerSemanticCategory.Hex: return Get("dlc.hex", language);
+                case MarkerSemanticCategory.Page: return Get("dlc.pages", language);
                 default: return Get("composition.unknown", language);
             }
         }
@@ -186,6 +198,9 @@ namespace ItemShareFix.Core
                 case MarkerSemanticCategory.LunarEquipment: return Get("summary.lunar_equipment", language);
                 case MarkerSemanticCategory.Other: return Get("summary.other", language);
                 case MarkerSemanticCategory.CommandState: return Get("summary.choice", language);
+                case MarkerSemanticCategory.Hallowed: return Get("dlc.hallowed", language);
+                case MarkerSemanticCategory.Hex: return Get("dlc.hex", language);
+                case MarkerSemanticCategory.Page: return Get("dlc.pages", language);
                 default: return Get("summary.unknown", language);
             }
         }

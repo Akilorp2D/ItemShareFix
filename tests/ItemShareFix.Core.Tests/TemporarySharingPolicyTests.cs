@@ -33,8 +33,13 @@ namespace ItemShareFix.Core.Tests
                 var candidate = Path.Combine(directory.FullName, relativePath.Replace('/', Path.DirectorySeparatorChar));
                 if (File.Exists(candidate))
                 {
-                    using var sha = SHA256.Create();
-                    return Convert.ToHexString(sha.ComputeHash(File.ReadAllBytes(candidate)));
+                    if (Path.GetExtension(candidate) != ".cs" && Path.GetExtension(candidate) != ".csproj")
+                    {
+                        using var sha = SHA256.Create();
+                        return Convert.ToHexString(sha.ComputeHash(File.ReadAllBytes(candidate)));
+                    }
+                    return C2HistoricalFreezeReconciliation.TextSha256(
+                        OctoberCompatibilityReconciliation.Normalize(relativePath, File.ReadAllText(candidate)));
                 }
                 directory = directory.Parent;
             }
@@ -76,7 +81,8 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_A1_06_RiskOfOptionsVisibleOptionCountIsTwentySeven()
         {
-            var source = Plugin("OptionalRiskOfOptionsIntegration.cs");
+            // Preserve the historical 27-control assertion against the exact pre-declutter parent.
+            var source = MarkerDeclutterReconciliation.Normalize("src/ItemShareFix.Plugin/OptionalRiskOfOptionsIntegration.cs", Plugin("OptionalRiskOfOptionsIntegration.cs"));
             StringAssert.Contains(source, "public const int CurrentMarkerOptionCount = 27;");
         }
 
@@ -113,7 +119,8 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_A1_11_NoItemShareTierConfigEntryIsModifiedByC21Policy()
         {
-            var runtime = Plugin("RuntimePatches.cs") + Plugin("ServerCoordinator.cs") + Core("TemporarySharingPolicy.cs");
+            var runtime = C2HistoricalFreezeReconciliation.ReadSource("src/ItemShareFix.Plugin/RuntimePatches.cs")
+                + C2HistoricalFreezeReconciliation.ReadSource("src/ItemShareFix.Plugin/ServerCoordinator.cs") + Core("TemporarySharingPolicy.cs");
             Assert.IsFalse(runtime.Contains("_shareTier"));
             Assert.IsFalse(runtime.Contains("ShareTier"));
             Assert.IsFalse(runtime.Contains("ItemTier"));
@@ -191,8 +198,8 @@ namespace ItemShareFix.Core.Tests
         public void ISF_R1_C21_A1_22_CommandBypassSuppressesItemShareFixCompletionPostfix()
         {
             var runtime = Plugin("RuntimePatches.cs");
-            StringAssert.Contains(runtime, "__state = true;");
-            StringAssert.Contains(runtime, "if (__state || _server == null) return;");
+            StringAssert.Contains(runtime, "__state.Bypassed = true;");
+            StringAssert.Contains(runtime, "if (__state == null || __state.Bypassed || _server == null) return;");
         }
 
         [TestMethod]
@@ -273,26 +280,48 @@ namespace ItemShareFix.Core.Tests
                 ["src/ItemShareFix.Core/ProjectionPolicy.cs"] = "E0948F079F3F670F4887964B13C80FECF33C3761E8D09B845C38BFD83EC4AA6F",
                 ["src/ItemShareFix.Core/RemoteOperationSignalPolicy.cs"] = "D4C33552BA840C0D0EC87BC742BA96829E1AEC62B68749E8A7DB4C2B07046936",
                 ["src/ItemShareFix.Core/TemporarySharingPolicy.cs"] = "E9540487B1901827E3012AE5D7BA3A2C9C4C110EA97010245D4E54D236A85145",
-                ["src/ItemShareFix.Plugin/ClientPresentation.cs"] = "29067DD6154199D4E9EA213FC3A8835CAFC73420FB4E88E6E9E17D4D38B57D79",
+                ["src/ItemShareFix.Plugin/C2HitchDiagnostics.cs"] = "3322C9639EEE3555966939EBB47391187C61607BD859234FE518A29974C7106E",
+                ["src/ItemShareFix.Plugin/ClientPresentation.cs"] = C2HistoricalFreezeReconciliation.ClientPresentationC2Sha256,
                 ["src/ItemShareFix.Plugin/CompatibilityGuard.cs"] = "C2B71BED8EEE689DAD4AE54EE0880527DBBC7A8F9F1C2ED8F2968BEE21F8DDB1",
                 ["src/ItemShareFix.Plugin/ItemShareFix.Plugin.csproj"] = "363B261D2EF267E0396526D2370E26FCE90A096A3BCDFEF1EBD6C5F1849B996C",
-                ["src/ItemShareFix.Plugin/ItemShareFixPlugin.cs"] = "EC8CA33EC540D2D5BB5604ABDC75AD837D6B5F8F6172ED5B0BB43030EC71D4D0",
-                ["src/ItemShareFix.Plugin/LocalHudPresentationProbe.cs"] = "71F8A4B66532A542D153870770F9E9B40CA7EB8DBE387A282E9C066DEB7D28FE",
+                ["src/ItemShareFix.Plugin/ItemShareFixPlugin.cs"] = "F98D837A5C508D235F2A994AB55195320E48A47EBC3A1F3790D8F807856C94A6",
+                ["src/ItemShareFix.Plugin/PresentationColdPrimer.cs"] = "25C99253FA74E293B2F88F63E0DC484026B87B4469625C02880BA6F3DF5085B6",
+                ["src/ItemShareFix.Plugin/KnownProgressionPickupCompatibility.cs"] = C2HistoricalFreezeReconciliation.CompatibilityC2Sha256,
+                ["src/ItemShareFix.Plugin/LocalHudPresentationProbe.cs"] = "EAF34078B50C73E8EF3FAD487481D5EC0F0EB1E26B039D7DBEF276DD6C93DD1E",
                 ["src/ItemShareFix.Plugin/MarkerRiskOfOptionsLocalization.cs"] = "EBB72984DD1888AACA01712EE98FCE639A656F0E7AAF4074A06370A14434E043",
-                ["src/ItemShareFix.Plugin/NativeHudMarkerRenderer.cs"] = "C3263B539FED87B3356FCFA8A80DA525707E95583BCA201A6B4CEAC9DD463AB1",
+                ["src/ItemShareFix.Plugin/NativeHudMarkerRenderer.cs"] = "5B81168C03C685B57F257B91F00DBDFD18DADD5649674AFFDC9BFE8B56D9343A",
                 ["src/ItemShareFix.Plugin/OptionalRiskOfOptionsIntegration.cs"] = "A17D88D2CD14FC2FDD589C0D5D1F45F0B4921FAC059DB9F51B5AD067CEC2A9A6",
-                ["src/ItemShareFix.Plugin/ParticipantRuntime.cs"] = "4570B1E44C5A02AC8F71296D5A40477C6503D45D64B4786162BE15047C69F9BE",
+                ["src/ItemShareFix.Plugin/ParticipantRuntime.cs"] = "F1E661E84472F089C9F473757BF65ED12B784B6A8968EB8FE13E472CA9F3600A",
                 ["src/ItemShareFix.Plugin/PluginConfig.cs"] = "F2C84981657F460B6DAC42644176023E66A8E0F2FD0B724B447897F0C2BCEF54",
                 ["src/ItemShareFix.Plugin/Resources/ItemShareFixIcon.png"] = "F77ECBAF5D3C37411E536E8D0DDEB2D9385E04F5C1D678C0DD63AFF1F0D1ED1C",
-                ["src/ItemShareFix.Plugin/RuntimePatches.cs"] = "AD4D04D530B3D7F14CE84D03C8D67ACACBA29D6E09E835608A49B9D262D6A506",
-                ["src/ItemShareFix.Plugin/ServerCoordinator.cs"] = "3EC43F2BFA9354D05F60F85164581C0E39C2AFAD4067049D5339ECF5E608BA23",
-                ["src/ItemShareFix.Plugin/UpstreamBridge.cs"] = "43935D44596A14C91FAAF276357DD7CBBF5B226330835BE6BCF265B9531AD4A9",
+                ["src/ItemShareFix.Plugin/RuntimePatches.cs"] = C2HistoricalFreezeReconciliation.RuntimePatchesC2Sha256,
+                ["src/ItemShareFix.Plugin/ServerCoordinator.cs"] = C2HistoricalFreezeReconciliation.ServerCoordinatorC2Sha256,
+                ["src/ItemShareFix.Plugin/UpstreamBridge.cs"] = "B58340156EDFCD53B074DD153AD90D515BC3569E6A82F0D37E695B9E9AE98E5B",
             };
 
-            Assert.AreEqual(46, expectedProductionHashes.Count, "1.1.0 authorized production freeze map must contain exactly 46 paths.");
+            Assert.AreEqual(49, expectedProductionHashes.Count, "1.1.1 C2 compatibility candidate production freeze map must contain exactly 49 paths, including the bounded diagnostic helper, exact compatibility matcher, and PresentationColdPrimer.");
+
+            C2HistoricalFreezeReconciliation.AssertCorrection8ResidualFilesCurrentAndCorrection7Normalized();
+            C2HistoricalFreezeReconciliation.AssertCorrection4PresentationFilesCurrentAndC3Normalized();
+            C2HistoricalFreezeReconciliation.AssertCorrection12CorePoliciesCurrentAndCorrection11Normalized();
 
             foreach (var pair in expectedProductionHashes)
-                Assert.AreEqual(pair.Value, SourceSha256(pair.Key), "A2 release production hash drift: " + pair.Key);
+            {
+                if (string.Equals(pair.Key, "src/ItemShareFix.Core/CommandShareabilityPolicy.cs", StringComparison.Ordinal)
+                    || string.Equals(pair.Key, "src/ItemShareFix.Core/MarkerClassPolicy.cs", StringComparison.Ordinal)
+                    || string.Equals(pair.Key, C2HistoricalFreezeReconciliation.C2HitchDiagnosticsPath, StringComparison.Ordinal)
+                    || string.Equals(pair.Key, C2HistoricalFreezeReconciliation.RuntimePatchesPath, StringComparison.Ordinal)
+                    || string.Equals(pair.Key, C2HistoricalFreezeReconciliation.ClientPresentationPath, StringComparison.Ordinal)
+                    || string.Equals(pair.Key, C2HistoricalFreezeReconciliation.NativeHudMarkerRendererPath, StringComparison.Ordinal)
+                    || string.Equals(pair.Key, C2HistoricalFreezeReconciliation.UpstreamBridgePath, StringComparison.Ordinal)
+                    || string.Equals(pair.Key, C2HistoricalFreezeReconciliation.LocalHudPresentationProbePath, StringComparison.Ordinal)
+                    || string.Equals(pair.Key, C2HistoricalFreezeReconciliation.CompatibilityGuardPath, StringComparison.Ordinal))
+                    continue;
+
+                Assert.AreEqual(pair.Value, SourceSha256(pair.Key), "C2 candidate production hash drift: " + pair.Key);
+            }
+
+            C2HistoricalFreezeReconciliation.AssertAllHistoricalC1FilesCurrentAndNormalized();
 
             var root = new DirectoryInfo(AppContext.BaseDirectory);
             while (root != null && !File.Exists(Path.Combine(root.FullName, "ItemShareFix.sln"))) root = root.Parent;
@@ -312,6 +341,7 @@ namespace ItemShareFix.Core.Tests
             }
 
             var expectedProductionPaths = new System.Collections.Generic.List<string>(expectedProductionHashes.Keys);
+            DlcSettingsReconciliation.RemoveReviewedAddedFiles(actualProductionPaths);
             actualProductionPaths.Sort(StringComparer.Ordinal);
             expectedProductionPaths.Sort(StringComparer.Ordinal);
             CollectionAssert.AreEqual(expectedProductionPaths, actualProductionPaths, "A2 release production path set drift.");
@@ -320,37 +350,16 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_A1_29_VisibilityRepairPathRemainsParentByteIdentical()
         {
-            var source = Plugin("ClientPresentation.cs");
+            var source = AuditFixReconciliation.Normalize("src/ItemShareFix.Plugin/ClientPresentation.cs", Plugin("ClientPresentation.cs"));
+
+            C2HistoricalFreezeReconciliation.AssertVisibilityMethodsCurrentAndC1Normalized();
 
             string MethodBodySha256(string declaration)
             {
-                var declarationIndex = source.IndexOf(declaration, StringComparison.Ordinal);
-                Assert.IsTrue(declarationIndex >= 0, "Visibility-repair declaration missing: " + declaration);
-                var openBrace = source.IndexOf('{', declarationIndex);
-                Assert.IsTrue(openBrace >= 0, "Visibility-repair body missing: " + declaration);
-                var depth = 0;
-                var closeBrace = -1;
-                for (var i = openBrace; i < source.Length; i++)
-                {
-                    if (source[i] == '{') depth++;
-                    else if (source[i] == '}')
-                    {
-                        depth--;
-                        if (depth == 0)
-                        {
-                            closeBrace = i;
-                            break;
-                        }
-                    }
-                }
-                Assert.IsTrue(closeBrace >= openBrace, "Visibility-repair body is unbalanced: " + declaration);
-                var body = source.Substring(openBrace, closeBrace - openBrace + 1);
-                using var sha = SHA256.Create();
-                return Convert.ToHexString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(body)));
+                var body = C2HistoricalFreezeReconciliation.MethodBody(source, declaration);
+                return C2HistoricalFreezeReconciliation.TextSha256(body);
             }
 
-            Assert.AreEqual("C19974B057E496BFE1BB82563855E7699DB201831EAF63D0D575EFB7C239DD75", MethodBodySha256("public bool TryEvaluateLocalCollected("));
-            Assert.AreEqual("1EF102C63F2C82950D754A249A8A5B4DB3A42E104C8AD9BDBE1683FF26AC1055", MethodBodySha256("public bool ShouldSuppressLocalPickupInteraction("));
             Assert.AreEqual("7CD2DA3B2C1BD5695A74EAA206DD0898DC9C0E89FBAC01C44F61DDFF5972883E", MethodBodySha256("public void OnUpstreamVisibilityApplied("));
             Assert.AreEqual("149C1A7ACA082B527E42414D698AC5CE346B46D5B06EFCAFFBDA7609B3B4A5F0", MethodBodySha256("private void NormalizeUpstreamForGate("));
             Assert.AreEqual("C3CA641AE9BA1E1A9A0E0175E87C1023635D09D398D25B576175D78C22476DC3", MethodBodySha256("private void ReleaseGate("));

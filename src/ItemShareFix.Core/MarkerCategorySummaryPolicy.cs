@@ -48,7 +48,7 @@ namespace ItemShareFix.Core
         public const MarkerCategorySortOrder DefaultSortOrder = MarkerCategorySortOrder.HighToLow;
         public const float PyramidMaxVerticalOffsetUnits = 0.60f;
         public const float PyramidMinimumHorizontalSpacingFactor = 0.62f;
-        public const int MaxCategories = 11;
+        public const int MaxCategories = 14;
 
         public static int DisplayPriority(MarkerSemanticCategory category)
         {
@@ -64,6 +64,9 @@ namespace ItemShareFix.Core
                 case MarkerSemanticCategory.Tier1: return 40;
                 case MarkerSemanticCategory.CommandState: return 30;
                 case MarkerSemanticCategory.Other: return 20;
+                case MarkerSemanticCategory.Hallowed: return 115;
+                case MarkerSemanticCategory.Hex: return 35;
+                case MarkerSemanticCategory.Page: return 85;
                 default: return 10;
             }
         }
@@ -86,7 +89,7 @@ namespace ItemShareFix.Core
                 entries[write++] = new MarkerCompactCategoryBadge(source.Category, source.Count, DisplayPriority(source.Category));
             }
 
-            // Bounded insertion sort: semantic categories are capped at eleven, so this avoids an allocation-heavy
+            // Bounded insertion sort: semantic categories are capped at fourteen, so this avoids an allocation-heavy
             // full LINQ sort in the marker hot path while remaining deterministic.
             for (var i = 1; i < entries.Length; i++)
             {
@@ -348,6 +351,9 @@ namespace ItemShareFix.Core
                 case 8: return new[] { 1, 2, 2, 2, 1 };
                 case 9: return new[] { 1, 2, 3, 2, 1 };
                 case 10: return new[] { 1, 2, 3, 3, 1 };
+                case 12: return new[] { 1, 2, 3, 3, 2, 1 };
+                case 13: return new[] { 1, 2, 3, 3, 3, 1 };
+                case 14: return new[] { 1, 3, 3, 3, 3, 1 };
                 default: return new[] { 1, 3, 3, 3, 1 };
             }
         }

@@ -1,0 +1,372 @@
+using System;
+using System.Globalization;
+using BepInEx.Logging;
+using UnityEngine;
+
+namespace ItemShareFix
+{
+    internal enum C2HitchPhase
+    {
+        ClientSweep = 0,
+        ClientSweepPickupPresent = 1,
+        ClientRenderFrameMarkerBearing = 2,
+        NativeMarkerRender = 3,
+        EnsureCanvas = 4,
+        ResolveNativeTypography = 5,
+        GetOrCreateView = 6,
+        MeasureVisualFootprint = 7,
+        ServerBeginDistribution = 8,
+        ServerEnsureClaims = 9,
+        ServerSweepParticipantsPeriodic = 10,
+        ServerSweepParticipantsDistribution = 11,
+        ClientHudProbe = 12,
+        ClientCandidateBuild = 13,
+        ClientRendererCall = 14,
+        NativeSemanticBuild = 15,
+        NativeLayoutSolve = 16,
+        NativeApplyViews = 17,
+        NativePostRenderCleanup = 18,
+        ColdWarmupHudProbe = 19,
+        ColdWarmupNative = 20,
+        SemanticSignatureIndex = 21,
+        SemanticBuildWorldMembers = 22,
+        SemanticTrackerUpdate = 23,
+        SemanticDenseTrackerUpdate = 24,
+        SemanticClassification = 25,
+        SemanticExpansionLod = 26,
+        LayoutClusterFrameBuild = 27,
+        LayoutPlacementCandidateBuild = 28,
+        LayoutSingleMarkerPlacement = 29,
+        LayoutDirectionalAggregation = 30,
+        PresentationPlanBuild = 31,
+        ApplyTextStyle = 32,
+        ApplyGeometryLayout = 33,
+        ApplyActivation = 34,
+        LoadingNestedPrimer = 35,
+        CommandPickerDiscovery = 36,
+        CommandOptionResolution = 37,
+        CommandMarkerRegistryUpdate = 38,
+        CommandRenderInputConstruction = 39,
+        FirstMarkerActivationEndToEnd = 40,
+        Count = 41,
+    }
+
+    internal readonly struct C2HitchToken
+    {
+        public C2HitchToken(
+            C2HitchPhase phase,
+            long startedTicks,
+            int frame,
+            float unscaledTime,
+            int gc0,
+            int gc1,
+            int gc2,
+            int markerCount,
+            int pickupCount,
+            int participantCount,
+            int claimCount)
+        {
+            Active = true;
+            Phase = phase;
+            StartedTicks = startedTicks;
+            Frame = frame;
+            UnscaledTime = unscaledTime;
+            Gc0 = gc0;
+            Gc1 = gc1;
+            Gc2 = gc2;
+            MarkerCount = markerCount;
+            PickupCount = pickupCount;
+            ParticipantCount = participantCount;
+            ClaimCount = claimCount;
+        }
+
+        public bool Active { get; }
+        public C2HitchPhase Phase { get; }
+        public long StartedTicks { get; }
+        public int Frame { get; }
+        public float UnscaledTime { get; }
+        public int Gc0 { get; }
+        public int Gc1 { get; }
+        public int Gc2 { get; }
+        public int MarkerCount { get; }
+        public int PickupCount { get; }
+        public int ParticipantCount { get; }
+        public int ClaimCount { get; }
+    }
+
+    internal static class C2HitchDiagnostics
+    {
+        private const int MaxRecords = 64;
+        private const float FlushDelaySeconds = 0.75f;
+        private static readonly Sample[] Records = new Sample[MaxRecords];
+        private static readonly int[] PhaseCounts = new int[(int)C2HitchPhase.Count];
+        private static int _recordCount;
+        private static int _flushedCount;
+        private static int _firstMarkerFrame = -1;
+        private static int _lastCaptureFrame = -1;
+        private static float _nextFlushAt;
+        private static bool _enabled;
+        private static bool _captureSuppressed;
+
+        private struct Sample
+        {
+            public C2HitchPhase Phase;
+            public int Ordinal;
+            public int Frame;
+            public float UnscaledTime;
+            public long ElapsedTicks;
+            public bool ServerActive;
+            public bool ClientActive;
+            public int MarkerCountBefore;
+            public int MarkerCountAfter;
+            public int PickupCountBefore;
+            public int PickupCountAfter;
+            public int ParticipantCountBefore;
+            public int ParticipantCountAfter;
+            public int ClaimCountBefore;
+            public int ClaimCountAfter;
+            public int Gc0Delta;
+            public int Gc1Delta;
+            public int Gc2Delta;
+            public int FirstMarkerFrame;
+        }
+
+        public static void SetEnabled(bool enabled) => _enabled = enabled;
+
+        public static void SetCaptureSuppressed(bool suppressed) => _captureSuppressed = suppressed;
+
+        public static void MarkFirstMarkerFrame()
+        {
+            if (!_enabled || _captureSuppressed || _firstMarkerFrame >= 0) return;
+            _firstMarkerFrame = Time.frameCount;
+        }
+
+        public static C2HitchToken Begin(
+            C2HitchPhase phase,
+            int markerCount = -1,
+            int pickupCount = -1,
+            int participantCount = -1,
+            int claimCount = -1)
+        {
+            if (!_enabled || _captureSuppressed) return default;
+            var phaseIndex = (int)phase;
+            if (phaseIndex < 0 || phaseIndex >= PhaseCounts.Length) return default;
+            if (PhaseCounts[phaseIndex] >= MaxSamples(phase) || _recordCount >= MaxRecords) return default;
+            return new C2HitchToken(
+                phase,
+                System.Diagnostics.Stopwatch.GetTimestamp(),
+                Time.frameCount,
+                Time.unscaledTime,
+                GC.CollectionCount(0),
+                GC.CollectionCount(1),
+                GC.CollectionCount(2),
+                markerCount,
+                pickupCount,
+                participantCount,
+                claimCount);
+        }
+
+        public static void End(
+            C2HitchToken token,
+            int markerCount = -1,
+            int pickupCount = -1,
+            int participantCount = -1,
+            int claimCount = -1)
+        {
+            if (!token.Active || _recordCount >= MaxRecords) return;
+            var phaseIndex = (int)token.Phase;
+            if (phaseIndex < 0 || phaseIndex >= PhaseCounts.Length || PhaseCounts[phaseIndex] >= MaxSamples(token.Phase)) return;
+
+            var ordinal = ++PhaseCounts[phaseIndex];
+            Records[_recordCount++] = new Sample
+            {
+                Phase = token.Phase,
+                Ordinal = ordinal,
+                Frame = token.Frame,
+                UnscaledTime = token.UnscaledTime,
+                ElapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - token.StartedTicks,
+                ServerActive = UnityEngine.Networking.NetworkServer.active,
+                ClientActive = UnityEngine.Networking.NetworkClient.active,
+                MarkerCountBefore = token.MarkerCount,
+                MarkerCountAfter = markerCount,
+                PickupCountBefore = token.PickupCount,
+                PickupCountAfter = pickupCount,
+                ParticipantCountBefore = token.ParticipantCount,
+                ParticipantCountAfter = participantCount,
+                ClaimCountBefore = token.ClaimCount,
+                ClaimCountAfter = claimCount,
+                Gc0Delta = GC.CollectionCount(0) - token.Gc0,
+                Gc1Delta = GC.CollectionCount(1) - token.Gc1,
+                Gc2Delta = GC.CollectionCount(2) - token.Gc2,
+                FirstMarkerFrame = _firstMarkerFrame,
+            };
+            _lastCaptureFrame = Time.frameCount;
+            _nextFlushAt = Time.unscaledTime + FlushDelaySeconds;
+        }
+
+        public static void FlushIfReady(ManualLogSource log)
+        {
+            if (!_enabled || _flushedCount >= _recordCount) return;
+            if (Time.frameCount <= _lastCaptureFrame + 2 || Time.unscaledTime < _nextFlushAt) return;
+
+            for (var i = _flushedCount; i < _recordCount; i++)
+            {
+                var sample = Records[i];
+                var elapsedUs = sample.ElapsedTicks * 1000000.0 / System.Diagnostics.Stopwatch.Frequency;
+                var host = sample.ServerActive && sample.ClientActive;
+                log.LogInfo(
+                    "[ItemShareFix] ISF_C2_HITCH_DIAG"
+                    + " phase=" + PhaseToken(sample.Phase)
+                    + " method=" + MethodToken(sample.Phase)
+                    + " context=" + ContextToken(sample.Phase)
+                    + " sample=" + (sample.Ordinal == 1 ? "first" : "subsequent")
+                    + " ordinal=" + sample.Ordinal.ToString(CultureInfo.InvariantCulture)
+                    + " frame=" + sample.Frame.ToString(CultureInfo.InvariantCulture)
+                    + " time=" + sample.UnscaledTime.ToString("F6", CultureInfo.InvariantCulture)
+                    + " elapsed_us=" + elapsedUs.ToString("F3", CultureInfo.InvariantCulture)
+                    + " host=" + (host ? "true" : "false")
+                    + " server=" + (sample.ServerActive ? "true" : "false")
+                    + " client=" + (sample.ClientActive ? "true" : "false")
+                    + " markers_before=" + sample.MarkerCountBefore.ToString(CultureInfo.InvariantCulture)
+                    + " markers_after=" + sample.MarkerCountAfter.ToString(CultureInfo.InvariantCulture)
+                    + " pickups_before=" + sample.PickupCountBefore.ToString(CultureInfo.InvariantCulture)
+                    + " pickups_after=" + sample.PickupCountAfter.ToString(CultureInfo.InvariantCulture)
+                    + " participants_before=" + sample.ParticipantCountBefore.ToString(CultureInfo.InvariantCulture)
+                    + " participants_after=" + sample.ParticipantCountAfter.ToString(CultureInfo.InvariantCulture)
+                    + " claims_before=" + sample.ClaimCountBefore.ToString(CultureInfo.InvariantCulture)
+                    + " claims_after=" + sample.ClaimCountAfter.ToString(CultureInfo.InvariantCulture)
+                    + " gc0_delta=" + sample.Gc0Delta.ToString(CultureInfo.InvariantCulture)
+                    + " gc1_delta=" + sample.Gc1Delta.ToString(CultureInfo.InvariantCulture)
+                    + " gc2_delta=" + sample.Gc2Delta.ToString(CultureInfo.InvariantCulture)
+                    + " first_marker_frame=" + sample.FirstMarkerFrame.ToString(CultureInfo.InvariantCulture)
+                    + " same_first_marker_frame=" + (sample.FirstMarkerFrame >= 0 && sample.Frame == sample.FirstMarkerFrame ? "true" : "false"));
+            }
+            _flushedCount = _recordCount;
+        }
+
+        private static int MaxSamples(C2HitchPhase phase)
+        {
+            if (phase == C2HitchPhase.EnsureCanvas || phase == C2HitchPhase.ResolveNativeTypography) return 1;
+            if (phase >= C2HitchPhase.SemanticSignatureIndex && phase <= C2HitchPhase.ApplyActivation) return 1;
+            if (phase == C2HitchPhase.LoadingNestedPrimer) return 1;
+            return 3;
+        }
+
+        private static string PhaseToken(C2HitchPhase phase)
+            => phase switch
+            {
+                C2HitchPhase.ClientSweep => "CLIENT_SWEEP",
+                C2HitchPhase.ClientSweepPickupPresent => "CLIENT_SWEEP",
+                C2HitchPhase.ClientRenderFrameMarkerBearing => "CLIENT_RENDER_FRAME",
+                C2HitchPhase.NativeMarkerRender => "NATIVE_MARKER_RENDER",
+                C2HitchPhase.EnsureCanvas => "ENSURE_CANVAS",
+                C2HitchPhase.ResolveNativeTypography => "RESOLVE_NATIVE_TYPOGRAPHY",
+                C2HitchPhase.GetOrCreateView => "GET_OR_CREATE_VIEW",
+                C2HitchPhase.MeasureVisualFootprint => "MEASURE_VISUAL_FOOTPRINT",
+                C2HitchPhase.ServerBeginDistribution => "SERVER_BEGIN_DISTRIBUTION",
+                C2HitchPhase.ServerEnsureClaims => "SERVER_ENSURE_CLAIMS",
+                C2HitchPhase.ServerSweepParticipantsPeriodic => "SERVER_SWEEP_PARTICIPANTS",
+                C2HitchPhase.ServerSweepParticipantsDistribution => "SERVER_SWEEP_PARTICIPANTS",
+                C2HitchPhase.ClientHudProbe => "CLIENT_HUD_PROBE",
+                C2HitchPhase.ClientCandidateBuild => "CLIENT_CANDIDATE_BUILD",
+                C2HitchPhase.ClientRendererCall => "CLIENT_RENDERER_CALL",
+                C2HitchPhase.NativeSemanticBuild => "NATIVE_SEMANTIC_BUILD",
+                C2HitchPhase.NativeLayoutSolve => "NATIVE_LAYOUT_SOLVE",
+                C2HitchPhase.NativeApplyViews => "NATIVE_APPLY_VIEWS",
+                C2HitchPhase.NativePostRenderCleanup => "NATIVE_POST_RENDER_CLEANUP",
+                C2HitchPhase.ColdWarmupHudProbe => "COLD_WARMUP_HUD_PROBE",
+                C2HitchPhase.ColdWarmupNative => "COLD_WARMUP_NATIVE",
+                C2HitchPhase.SemanticSignatureIndex => "SEMANTIC_SIGNATURE_INDEX",
+                C2HitchPhase.SemanticBuildWorldMembers => "SEMANTIC_BUILD_WORLD_MEMBERS",
+                C2HitchPhase.SemanticTrackerUpdate => "SEMANTIC_TRACKER_UPDATE",
+                C2HitchPhase.SemanticDenseTrackerUpdate => "SEMANTIC_DENSE_TRACKER_UPDATE",
+                C2HitchPhase.SemanticClassification => "SEMANTIC_CLASSIFICATION",
+                C2HitchPhase.SemanticExpansionLod => "SEMANTIC_EXPANSION_LOD",
+                C2HitchPhase.LayoutClusterFrameBuild => "LAYOUT_CLUSTER_FRAME_BUILD",
+                C2HitchPhase.LayoutPlacementCandidateBuild => "LAYOUT_PLACEMENT_CANDIDATE_BUILD",
+                C2HitchPhase.LayoutSingleMarkerPlacement => "LAYOUT_SINGLE_MARKER_PLACEMENT",
+                C2HitchPhase.LayoutDirectionalAggregation => "LAYOUT_DIRECTIONAL_AGGREGATION",
+                C2HitchPhase.PresentationPlanBuild => "PRESENTATION_PLAN_BUILD",
+                C2HitchPhase.ApplyTextStyle => "APPLY_TEXT_STYLE",
+                C2HitchPhase.ApplyGeometryLayout => "APPLY_GEOMETRY_LAYOUT",
+                C2HitchPhase.ApplyActivation => "APPLY_ACTIVATION",
+                C2HitchPhase.LoadingNestedPrimer => "LOADING_NESTED_PRIMER",
+                C2HitchPhase.CommandPickerDiscovery => "COMMAND_PICKER_DISCOVERY",
+                C2HitchPhase.CommandOptionResolution => "COMMAND_OPTION_RESOLUTION",
+                C2HitchPhase.CommandMarkerRegistryUpdate => "COMMAND_MARKER_REGISTRY_UPDATE",
+                C2HitchPhase.CommandRenderInputConstruction => "COMMAND_RENDER_INPUT_CONSTRUCTION",
+                C2HitchPhase.FirstMarkerActivationEndToEnd => "FIRST_MARKER_ACTIVATION_END_TO_END",
+                _ => "UNKNOWN",
+            };
+
+        private static string MethodToken(C2HitchPhase phase)
+            => phase switch
+            {
+                C2HitchPhase.ClientSweep => "ClientPresentationCoordinator.Sweep",
+                C2HitchPhase.ClientSweepPickupPresent => "ClientPresentationCoordinator.Sweep",
+                C2HitchPhase.ClientRenderFrameMarkerBearing => "ClientPresentationCoordinator.RenderFrame",
+                C2HitchPhase.NativeMarkerRender => "NativeHudMarkerRenderer.Render",
+                C2HitchPhase.EnsureCanvas => "NativeHudMarkerRenderer.EnsureCanvas",
+                C2HitchPhase.ResolveNativeTypography => "NativeHudMarkerRenderer.ResolveNativeTypography",
+                C2HitchPhase.GetOrCreateView => "NativeHudMarkerRenderer.GetOrCreateView",
+                C2HitchPhase.MeasureVisualFootprint => "NativeHudMarkerRenderer.GetOrMeasureVisualFootprint",
+                C2HitchPhase.ServerBeginDistribution => "ServerCoordinator.BeginDistribution",
+                C2HitchPhase.ServerEnsureClaims => "ServerCoordinator.EnsureClaims",
+                C2HitchPhase.ServerSweepParticipantsPeriodic => "ServerCoordinator.SweepParticipants",
+                C2HitchPhase.ServerSweepParticipantsDistribution => "ServerCoordinator.SweepParticipants",
+                C2HitchPhase.ClientHudProbe => "ClientPresentationCoordinator.RenderFrame.HudProbe",
+                C2HitchPhase.ClientCandidateBuild => "ClientPresentationCoordinator.RenderFrame.BuildCandidates",
+                C2HitchPhase.ClientRendererCall => "ClientPresentationCoordinator.RenderFrame.RendererCall",
+                C2HitchPhase.NativeSemanticBuild => "NativeHudMarkerRenderer.Render.SemanticBuild",
+                C2HitchPhase.NativeLayoutSolve => "NativeHudMarkerRenderer.Render.LayoutSolve",
+                C2HitchPhase.NativeApplyViews => "NativeHudMarkerRenderer.Render.ApplyViews",
+                C2HitchPhase.NativePostRenderCleanup => "NativeHudMarkerRenderer.Render.PostCleanup",
+                C2HitchPhase.ColdWarmupHudProbe => "ClientPresentationCoordinator.AdvanceMarkerColdPathWarmup",
+                C2HitchPhase.ColdWarmupNative => "NativeHudMarkerRenderer.WarmColdPathStep",
+                C2HitchPhase.SemanticSignatureIndex => "NativeHudMarkerRenderer.Render.SemanticSignatureIndex",
+                C2HitchPhase.SemanticBuildWorldMembers => "NativeHudMarkerRenderer.BuildWorldMembers",
+                C2HitchPhase.SemanticTrackerUpdate => "MarkerWorldClusterTracker.Update",
+                C2HitchPhase.SemanticDenseTrackerUpdate => "MarkerDenseAreaSummaryTracker.Update",
+                C2HitchPhase.SemanticClassification => "NativeHudMarkerRenderer.ClassifyPresentationNodes",
+                C2HitchPhase.SemanticExpansionLod => "NativeHudMarkerRenderer.BuildExpansionCandidates+MarkerAdaptiveLodTracker.Update",
+                C2HitchPhase.LayoutClusterFrameBuild => "NativeHudMarkerRenderer.TryBuildCurrentClusterFrame",
+                C2HitchPhase.LayoutPlacementCandidateBuild => "NativeHudMarkerRenderer.Render.PlacementCandidateBuild",
+                C2HitchPhase.LayoutSingleMarkerPlacement => "NativeHudMarkerRenderer.ResolveCurrentPlacements.Single",
+                C2HitchPhase.LayoutDirectionalAggregation => "MarkerDirectionalAggregationPolicy.Aggregate",
+                C2HitchPhase.PresentationPlanBuild => "NativeHudMarkerRenderer.GetOrBuildPresentationPlan",
+                C2HitchPhase.ApplyTextStyle => "NativeHudMarkerRenderer.ApplyView.TextStyle",
+                C2HitchPhase.ApplyGeometryLayout => "NativeHudMarkerRenderer.ApplyView.GeometryLayout",
+                C2HitchPhase.ApplyActivation => "NativeHudMarkerRenderer.ApplyView.Activation",
+                C2HitchPhase.LoadingNestedPrimer => "NativeHudMarkerRenderer.PrimeNestedColdPathDuringInitialization",
+                C2HitchPhase.CommandPickerDiscovery => "ClientPresentationCoordinator.Sweep.CommandPickerDiscovery",
+                C2HitchPhase.CommandOptionResolution => "ClientPresentationCoordinator.Sweep.CommandOptionResolution",
+                C2HitchPhase.CommandMarkerRegistryUpdate => "ClientPresentationCoordinator.Sweep.CommandMarkerRegistryUpdate",
+                C2HitchPhase.CommandRenderInputConstruction => "ClientPresentationCoordinator.RenderFrame.CommandRenderInputConstruction",
+                C2HitchPhase.FirstMarkerActivationEndToEnd => "ClientPresentationCoordinator.FirstMarkerEligibilityToRenderComplete",
+                _ => "unknown",
+            };
+
+        private static string ContextToken(C2HitchPhase phase)
+            => phase == C2HitchPhase.ServerSweepParticipantsDistribution ? "distribution"
+                : phase == C2HitchPhase.ServerSweepParticipantsPeriodic ? "periodic"
+                : phase == C2HitchPhase.ClientSweepPickupPresent ? "pickup-present"
+                : phase == C2HitchPhase.ClientRenderFrameMarkerBearing
+                    || phase == C2HitchPhase.NativeMarkerRender
+                    || phase == C2HitchPhase.ClientHudProbe
+                    || phase == C2HitchPhase.ClientCandidateBuild
+                    || phase == C2HitchPhase.ClientRendererCall
+                    || phase == C2HitchPhase.NativeSemanticBuild
+                    || phase == C2HitchPhase.NativeLayoutSolve
+                    || phase == C2HitchPhase.NativeApplyViews
+                    || phase == C2HitchPhase.NativePostRenderCleanup
+                    || (phase >= C2HitchPhase.SemanticSignatureIndex && phase <= C2HitchPhase.ApplyActivation) ? "marker-bearing"
+                : phase == C2HitchPhase.CommandPickerDiscovery
+                    || phase == C2HitchPhase.CommandOptionResolution
+                    || phase == C2HitchPhase.CommandMarkerRegistryUpdate
+                    || phase == C2HitchPhase.CommandRenderInputConstruction
+                    || phase == C2HitchPhase.FirstMarkerActivationEndToEnd ? "first-marker-activation"
+                : phase == C2HitchPhase.LoadingNestedPrimer ? "plugin-initialization-noninteractive"
+                : phase == C2HitchPhase.ColdWarmupHudProbe || phase == C2HitchPhase.ColdWarmupNative ? "cold-prewarm"
+                : "none";
+    }
+}

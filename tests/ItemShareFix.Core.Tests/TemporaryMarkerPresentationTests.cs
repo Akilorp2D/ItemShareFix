@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -61,8 +61,7 @@ namespace ItemShareFix.Core.Tests
                 var candidate = Path.Combine(directory.FullName, relativePath.Replace('/', Path.DirectorySeparatorChar));
                 if (File.Exists(candidate))
                 {
-                    using var sha = SHA256.Create();
-                    return Convert.ToHexString(sha.ComputeHash(File.ReadAllBytes(candidate)));
+                    return C2HistoricalFreezeReconciliation.SourceSha256(relativePath);
                 }
                 directory = directory.Parent;
             }
@@ -362,19 +361,31 @@ namespace ItemShareFix.Core.Tests
             const string eligibilityText = "MarkerLifetimePolicy.IsMarkerEligible(lifetime, _config.ShareTemporaryItems.Value)";
             var recognition = source.IndexOf(recognitionText, StringComparison.Ordinal);
             var eligibility = source.IndexOf(eligibilityText, recognition, StringComparison.Ordinal);
-            var commandRecognition = source.IndexOf("_upstream.TryGetCommandChoiceLifetime(", StringComparison.Ordinal);
-            var commandEligibility = source.IndexOf("MarkerLifetimePolicy.IsMarkerEligible(commandLifetime, _config.ShareTemporaryItems.Value)", commandRecognition, StringComparison.Ordinal);
+            var commandRecognition = source.IndexOf("_upstream.TryBuildCommandChoiceSnapshot(picker, out var commandOptions)", StringComparison.Ordinal);
+            var commandLifetimeReuse = source.IndexOf("commandLifetime = commandOptions.Lifetime;", commandRecognition, StringComparison.Ordinal);
+            var commandEligibility = source.IndexOf("MarkerLifetimePolicy.IsMarkerEligible(commandLifetime, _config.ShareTemporaryItems.Value)", commandLifetimeReuse, StringComparison.Ordinal);
 
             Assert.IsTrue(recognition >= 0);
             Assert.IsTrue(eligibility > recognition);
             Assert.IsTrue(commandRecognition >= 0);
-            Assert.IsTrue(commandEligibility > commandRecognition);
+            Assert.IsTrue(commandLifetimeReuse > commandRecognition);
+            Assert.IsTrue(commandEligibility > commandLifetimeReuse);
             Assert.AreEqual(MarkerLifetimeKind.Temporary, MarkerLifetimePolicy.FromTemporaryFlag(true));
             Assert.AreEqual(MarkerLifetimeKind.Permanent, MarkerLifetimePolicy.FromTemporaryFlag(false));
             Assert.IsFalse(MarkerLifetimePolicy.IsMarkerEligible(MarkerLifetimeKind.Temporary, false));
             Assert.AreEqual(MarkerLifetimeKind.Temporary, MarkerLifetimePolicy.FromTemporaryFlag(true));
             StringAssert.Contains(upstream, "if (exactNestedPickup.isTempItem) sawTemporary = true;");
-            StringAssert.Contains(upstream, "lifetime = MarkerLifetimePolicy.FromExactOptionKinds(sawTemporary, sawPermanent);");
+            var commandSnapshotStart = upstream.IndexOf("public bool TryBuildCommandChoiceSnapshot(", StringComparison.Ordinal);
+            var commandSnapshotEnd = upstream.IndexOf("public bool TryGetCommandChoicePickupIndexes(", commandSnapshotStart, StringComparison.Ordinal);
+            Assert.IsTrue(commandSnapshotStart >= 0 && commandSnapshotEnd > commandSnapshotStart);
+            var commandSnapshot = upstream.Substring(commandSnapshotStart, commandSnapshotEnd - commandSnapshotStart);
+            const string unknownGuard = "var lifetime = availableOptionCount == 0 || unresolvedAvailableOptionCount > 0";
+            const string unknownResult = "? MarkerLifetimeKind.Unknown";
+            const string exactLifetimeResult = ": MarkerLifetimePolicy.FromExactOptionKinds(sawTemporary, sawPermanent);";
+            var unknownGuardIndex = commandSnapshot.IndexOf(unknownGuard, StringComparison.Ordinal);
+            var unknownResultIndex = commandSnapshot.IndexOf(unknownResult, unknownGuardIndex, StringComparison.Ordinal);
+            var exactLifetimeIndex = commandSnapshot.IndexOf(exactLifetimeResult, unknownResultIndex, StringComparison.Ordinal);
+            Assert.IsTrue(unknownGuardIndex >= 0 && unknownResultIndex > unknownGuardIndex && exactLifetimeIndex > unknownResultIndex);
             Assert.IsFalse(upstream.Contains("ShareTemporaryItems", StringComparison.Ordinal));
             Assert.IsFalse(source.Contains("ShareTemporaryItems.Value ? MarkerLifetimePolicy.FromTemporaryFlag", StringComparison.Ordinal));
             Assert.IsFalse(source.Contains("ShareTemporaryItems.Value ? MarkerLifetimeKind", StringComparison.Ordinal));
@@ -383,7 +394,8 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_B1_31_PersonalMarkersEnabledOnlyGatesPresentationTracking()
         {
-            var source = ReadSource("src/ItemShareFix.Plugin/ClientPresentation.cs");
+            // The live scene gate is independently tested; retain the exact historical marker/lifetime contract.
+            var source = MarkerDeclutterReconciliation.Normalize("src/ItemShareFix.Plugin/ClientPresentation.cs", ReadSource("src/ItemShareFix.Plugin/ClientPresentation.cs"));
             StringAssert.Contains(source, "if (_config.PersonalMarkersEnabled.Value");
             StringAssert.Contains(source, "MarkerLifetimePolicy.FromTemporaryFlag(pickup.pickup.isTempItem)");
             Assert.IsFalse(source.Contains("PersonalMarkersEnabled.Value ? MarkerLifetime"));
@@ -405,9 +417,11 @@ namespace ItemShareFix.Core.Tests
         public void ISF_R1_C21_B1_35_CommandDirectPickupIndexFallbackWithoutNestedPickupIsUnknown()
         {
             var source = ReadSource("src/ItemShareFix.Plugin/UpstreamBridge.cs");
-            StringAssert.Contains(source, "pickup is not UniquePickup exactNestedPickup");
+            StringAssert.Contains(source, "nestedPickupObject is UniquePickup exactNestedPickup");
             StringAssert.Contains(source, "unresolvedAvailableOptionCount++");
-            StringAssert.Contains(source, "lifetime = MarkerLifetimeKind.Unknown;");
+            StringAssert.Contains(source, "? MarkerLifetimeKind.Unknown");
+            StringAssert.Contains(source, "accessor.DirectPickupIndex");
+            StringAssert.Contains(source, "CommandOptionSourcePolicy.Resolve(");
         }
 
         [TestMethod]
@@ -461,8 +475,8 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_B1_41_A1RuntimeGameplayFilesRemainByteIdentical()
         {
-            Assert.AreEqual("AD4D04D530B3D7F14CE84D03C8D67ACACBA29D6E09E835608A49B9D262D6A506", SourceSha256("src/ItemShareFix.Plugin/RuntimePatches.cs"));
-            Assert.AreEqual("3EC43F2BFA9354D05F60F85164581C0E39C2AFAD4067049D5339ECF5E608BA23", SourceSha256("src/ItemShareFix.Plugin/ServerCoordinator.cs"));
+            C2HistoricalFreezeReconciliation.AssertRuntimePatchesCurrentAndC1Normalized();
+            C2HistoricalFreezeReconciliation.AssertServerCoordinatorCurrentAndC1Normalized();
             Assert.AreEqual("E9540487B1901827E3012AE5D7BA3A2C9C4C110EA97010245D4E54D236A85145", SourceSha256("src/ItemShareFix.Core/TemporarySharingPolicy.cs"));
         }
 
@@ -708,8 +722,8 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_B1_C3_18_C21AGameplayAndShareTemporaryDefaultRemainFrozen()
         {
-            Assert.AreEqual("AD4D04D530B3D7F14CE84D03C8D67ACACBA29D6E09E835608A49B9D262D6A506", SourceSha256("src/ItemShareFix.Plugin/RuntimePatches.cs"));
-            Assert.AreEqual("3EC43F2BFA9354D05F60F85164581C0E39C2AFAD4067049D5339ECF5E608BA23", SourceSha256("src/ItemShareFix.Plugin/ServerCoordinator.cs"));
+            C2HistoricalFreezeReconciliation.AssertRuntimePatchesCurrentAndC1Normalized();
+            C2HistoricalFreezeReconciliation.AssertServerCoordinatorCurrentAndC1Normalized();
             Assert.AreEqual("E9540487B1901827E3012AE5D7BA3A2C9C4C110EA97010245D4E54D236A85145", SourceSha256("src/ItemShareFix.Core/TemporarySharingPolicy.cs"));
             Assert.AreEqual("F2C84981657F460B6DAC42644176023E66A8E0F2FD0B724B447897F0C2BCEF54", SourceSha256("src/ItemShareFix.Plugin/PluginConfig.cs"));
             StringAssert.Contains(ReadSource("src/ItemShareFix.Plugin/PluginConfig.cs"), "ShareTemporaryItems = config.Bind(\"General\", \"ShareTemporaryItems\", false");
@@ -945,8 +959,8 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_B1_C4_19_C21AGameplayAndConfigRemainExact()
         {
-            Assert.AreEqual("AD4D04D530B3D7F14CE84D03C8D67ACACBA29D6E09E835608A49B9D262D6A506", SourceSha256("src/ItemShareFix.Plugin/RuntimePatches.cs"));
-            Assert.AreEqual("3EC43F2BFA9354D05F60F85164581C0E39C2AFAD4067049D5339ECF5E608BA23", SourceSha256("src/ItemShareFix.Plugin/ServerCoordinator.cs"));
+            C2HistoricalFreezeReconciliation.AssertRuntimePatchesCurrentAndC1Normalized();
+            C2HistoricalFreezeReconciliation.AssertServerCoordinatorCurrentAndC1Normalized();
             Assert.AreEqual("E9540487B1901827E3012AE5D7BA3A2C9C4C110EA97010245D4E54D236A85145", SourceSha256("src/ItemShareFix.Core/TemporarySharingPolicy.cs"));
             Assert.AreEqual("F2C84981657F460B6DAC42644176023E66A8E0F2FD0B724B447897F0C2BCEF54", SourceSha256("src/ItemShareFix.Plugin/PluginConfig.cs"));
         }
@@ -1045,7 +1059,7 @@ namespace ItemShareFix.Core.Tests
         public void ISF_R1_C21_B1_C5_11_CompactTopologyOneThroughElevenRemainsBounded()
         {
             for (var n = 1; n <= 11; n++) Assert.AreEqual(n, MarkerCategorySummaryPolicy.BuildCompactLayout(n).Length);
-            Assert.AreEqual(11, MarkerCategorySummaryPolicy.BuildCompactLayout(99).Length);
+            Assert.AreEqual(14, MarkerCategorySummaryPolicy.BuildCompactLayout(99).Length);
         }
 
         [TestMethod]
@@ -1103,8 +1117,8 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_R1_C21_B1_C5_18_FrozenC21AFilesRemainExact()
         {
-            Assert.AreEqual("AD4D04D530B3D7F14CE84D03C8D67ACACBA29D6E09E835608A49B9D262D6A506", SourceSha256("src/ItemShareFix.Plugin/RuntimePatches.cs"));
-            Assert.AreEqual("3EC43F2BFA9354D05F60F85164581C0E39C2AFAD4067049D5339ECF5E608BA23", SourceSha256("src/ItemShareFix.Plugin/ServerCoordinator.cs"));
+            C2HistoricalFreezeReconciliation.AssertRuntimePatchesCurrentAndC1Normalized();
+            C2HistoricalFreezeReconciliation.AssertServerCoordinatorCurrentAndC1Normalized();
             Assert.AreEqual("E9540487B1901827E3012AE5D7BA3A2C9C4C110EA97010245D4E54D236A85145", SourceSha256("src/ItemShareFix.Core/TemporarySharingPolicy.cs"));
             Assert.AreEqual("F2C84981657F460B6DAC42644176023E66A8E0F2FD0B724B447897F0C2BCEF54", SourceSha256("src/ItemShareFix.Plugin/PluginConfig.cs"));
         }

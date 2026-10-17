@@ -1,0 +1,121 @@
+{
+            _performance.RecordRenderFrame();
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticLogging.Value);
+            C2HitchDiagnostics.FlushIfReady(_log);
+            var markerFeatureActive = _config.Enabled.Value
+                && _config.PersonalMarkersEnabled.Value
+                && (_markers.Count > 0 || _commandMarkers.Count > 0);
+            if (!markerFeatureActive)
+            {
+                if (_lastPerformanceMarkerCount > 0) EmitPerformanceSummary("marker-teardown", 0, force: true);
+                _lastPerformanceMarkerCount = 0;
+                _hudRenderer.SetPresentationSuppressed(false);
+                _hudRenderer.Clear();
+                return;
+            }
+
+            var markerCount = _markers.Count + _commandMarkers.Count;
+            C2HitchDiagnostics.MarkFirstMarkerFrame();
+            var c2RenderTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ClientRenderFrameMarkerBearing, markerCount: markerCount);
+            try
+            {
+            _lastPerformanceMarkerCount = markerCount;
+            MaybeEmitPerformanceSummary(markerCount);
+
+            var modalActive = _localHudProbe.TryGetBlockingModal(out var modalReason);
+            if (!_modalHudSuppressionDiagnosticState.HasValue
+                || _modalHudSuppressionDiagnosticState.Value != modalActive
+                || (modalActive && !string.Equals(_modalHudSuppressionReason, modalReason, StringComparison.Ordinal)))
+            {
+                _modalHudSuppressionDiagnosticState = modalActive;
+                _modalHudSuppressionReason = modalReason;
+                LogInfo("ISF_MARKER_HUD_SUPPRESS reason=" + (modalActive ? modalReason : "pause-menu") + " active=" + modalActive);
+            }
+
+            _hudRenderer.SetPresentationSuppressed(modalActive);
+            if (!MarkerPresentationPolicy.ShouldRenderHudMarkers(markerFeatureActive, modalActive)) return;
+
+            _dynamicHudZones.Clear();
+            var messageHudActive = _localHudProbe.TryGetVisibleMessageHudRect(out var messageHudRect);
+            if (messageHudActive)
+            {
+                _dynamicHudZones.Add(new MarkerHudExclusionZone(
+                    "message-hud-runtime",
+                    messageHudRect.Left, messageHudRect.Right, messageHudRect.Bottom, messageHudRect.Top));
+            }
+            var messageRectChanged = messageHudActive
+                && (!_hasMessageHudDiagnosticRect || !SameDiagnosticRect(_messageHudDiagnosticRect, messageHudRect));
+            if (!_messageHudDiagnosticState.HasValue
+                || _messageHudDiagnosticState.Value != messageHudActive
+                || messageRectChanged)
+            {
+                _messageHudDiagnosticState = messageHudActive;
+                _hasMessageHudDiagnosticRect = messageHudActive;
+                _messageHudDiagnosticRect = messageHudRect;
+                LogInfo("ISF_MARKER_MESSAGE_HUD active=" + messageHudActive
+                    + (messageHudActive ? " rect=" + FormatMarkerRect(messageHudRect) : string.Empty));
+            }
+
+            var camera = GetPresentationCamera();
+            if (camera == null || !TryGetFiniteCameraPosition(camera, out var cameraPosition))
+            {
+                _hudRenderer.Clear();
+                return;
+            }
+
+            var markerLanguage = CurrentMarkerLanguage();
+            _renderInputs.Clear();
+            for (var i = 0; i < _markers.Count;)
+            {
+                var marker = _markers[i];
+                if (!TryResolveOrdinaryMarkerTarget(marker.Pickup, out var basePosition, out var invalidReason))
+                {
+                    RemoveOrdinaryMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                if (!TryResolvePresentationDistance(cameraPosition, basePosition, out var distance, out invalidReason))
+                {
+                    RemoveOrdinaryMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                _renderInputs.Add(new MarkerRenderInput(
+                    new PersonalMarkerIdentity(PersonalMarkerKind.OrdinaryPickup, marker.InstanceId),
+                    basePosition + Vector3.up * 1.2f,
+                    distance, PickupLabel(marker.Pickup, markerLanguage), marker.ItemSemanticKey, marker.ClassName, marker.Kind, marker.TextColor, ResolvePickupIcon(marker.Pickup), marker.Lifetime));
+                i++;
+            }
+
+            for (var i = 0; i < _commandMarkers.Count;)
+            {
+                var marker = _commandMarkers[i];
+                if (!TryResolveCommandMarkerTarget(marker.Picker, out var basePosition, out var invalidReason))
+                {
+                    RemoveCommandMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                if (!TryResolvePresentationDistance(cameraPosition, basePosition, out var distance, out invalidReason))
+                {
+                    RemoveCommandMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                _renderInputs.Add(new MarkerRenderInput(
+                    new PersonalMarkerIdentity(PersonalMarkerKind.CommandPicker, marker.InstanceId),
+                    basePosition + Vector3.up * 1.35f,
+                    distance, MarkerClassPolicy.LocalizedReadableClassLabel(marker.Kind, markerLanguage), marker.ItemSemanticKey, marker.ClassName, marker.Kind, marker.TextColor, nativeIcon: null, lifetime: marker.Lifetime));
+                i++;
+            }
+
+            _hudRenderer.Render(
+                camera,
+                _renderInputs,
+                _config.MarkerSettingsSnapshot(),
+                _config.MarkerVisualSettingsSnapshot(),
+                markerLanguage,
+                OnMarkerRendered,
+                _dynamicHudZones);
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2RenderTiming, markerCount: _markers.Count + _commandMarkers.Count);
+            }
+        }

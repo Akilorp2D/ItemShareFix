@@ -2,7 +2,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Reflection;
 using ItemShareFix.Core;
 using RoR2;
@@ -99,12 +98,25 @@ namespace ItemShareFix
 
     internal static class ParticipantIdentityResolver
     {
+        private static readonly object MemberCacheGate = new object();
+        private static readonly Dictionary<Type, Dictionary<string, MemberInfo?>> MemberInfoCache =
+            new Dictionary<Type, Dictionary<string, MemberInfo?>>();
+        private static readonly Dictionary<Type, MemberInfo[]> ReadableMemberCache =
+            new Dictionary<Type, MemberInfo[]>();
+        private static readonly string[] PlayerSlotPreferredNames = { "playerControllerId", "subId" };
+
         public static bool TryResolve(PlayerCharacterMasterController controller, CharacterMaster master, out ParticipantKey key, out string evidence)
         {
             key = default;
             evidence = string.Empty;
 
-            var networkUser = NetworkUser.readOnlyInstancesList.FirstOrDefault(x => x != null && ReferenceEquals(x.master, master));
+            NetworkUser? networkUser = null;
+            foreach (var candidate in NetworkUser.readOnlyInstancesList)
+            {
+                if (candidate == null || !ReferenceEquals(candidate.master, master)) continue;
+                networkUser = candidate;
+                break;
+            }
             if (networkUser == null)
             {
                 evidence = "stable identity unsupported: no NetworkUser matched authoritative CharacterMaster";
@@ -188,11 +200,11 @@ namespace ItemShareFix
                 }
             }
 
-            var candidates = owner.GetType().GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                .Where(x => IsReadableMember(x) && string.Equals(GetMemberType(x)?.FullName, exactTypeFullName, StringComparison.Ordinal))
-                .ToArray();
-            foreach (var candidate in candidates)
+            var candidates = GetReadableMembers(owner.GetType());
+            for (var i = 0; i < candidates.Length; i++)
             {
+                var candidate = candidates[i];
+                if (!string.Equals(GetMemberType(candidate)?.FullName, exactTypeFullName, StringComparison.Ordinal)) continue;
                 var candidateValue = GetMemberValue(owner, candidate);
                 if (candidateValue == null) continue;
                 if (value != null) return false;
@@ -206,9 +218,9 @@ namespace ItemShareFix
         {
             slot = 0;
             memberName = string.Empty;
-            foreach (var preferredName in new[] { "playerControllerId", "subId" })
+            for (var i = 0; i < PlayerSlotPreferredNames.Length; i++)
             {
-                var preferred = GetMemberInfo(owner.GetType(), preferredName);
+                var preferred = GetMemberInfo(owner.GetType(), PlayerSlotPreferredNames[i]);
                 if (preferred == null || GetMemberType(preferred) != typeof(byte)) continue;
                 var value = GetMemberValue(owner, preferred);
                 if (value is byte exact)
@@ -219,14 +231,24 @@ namespace ItemShareFix
                 }
             }
 
-            var candidates = owner.GetType().GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                .Where(x => IsReadableMember(x) && GetMemberType(x) == typeof(byte))
-                .Select(x => new { Member = x, Value = GetMemberValue(owner, x) })
-                .Where(x => x.Value is byte)
-                .ToArray();
-            if (candidates.Length != 1) return false;
-            slot = (byte)candidates[0].Value!;
-            memberName = candidates[0].Member.Name;
+            MemberInfo? matchedMember = null;
+            byte matchedValue = 0;
+            var matchedCount = 0;
+            var candidates = GetReadableMembers(owner.GetType());
+            for (var i = 0; i < candidates.Length; i++)
+            {
+                var candidate = candidates[i];
+                if (GetMemberType(candidate) != typeof(byte)) continue;
+                var candidateValue = GetMemberValue(owner, candidate);
+                if (candidateValue is not byte exact) continue;
+                matchedCount++;
+                if (matchedCount != 1) continue;
+                matchedMember = candidate;
+                matchedValue = exact;
+            }
+            if (matchedCount != 1 || matchedMember == null) return false;
+            slot = matchedValue;
+            memberName = matchedMember.Name;
             return true;
         }
 
@@ -247,9 +269,40 @@ namespace ItemShareFix
 
         private static MemberInfo? GetMemberInfo(Type type, string name)
         {
-            var property = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            if (property != null && property.GetIndexParameters().Length == 0) return property;
-            return type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            lock (MemberCacheGate)
+            {
+                if (!MemberInfoCache.TryGetValue(type, out var byName))
+                {
+                    byName = new Dictionary<string, MemberInfo?>(StringComparer.Ordinal);
+                    MemberInfoCache[type] = byName;
+                }
+                if (byName.TryGetValue(name, out var cached)) return cached;
+
+                var property = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                MemberInfo? resolved = property != null && property.GetIndexParameters().Length == 0
+                    ? property
+                    : type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                byName[name] = resolved;
+                return resolved;
+            }
+        }
+
+        private static MemberInfo[] GetReadableMembers(Type type)
+        {
+            lock (MemberCacheGate)
+            {
+                if (ReadableMemberCache.TryGetValue(type, out var cached)) return cached;
+
+                var members = type.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var readable = new List<MemberInfo>(members.Length);
+                for (var i = 0; i < members.Length; i++)
+                {
+                    if (IsReadableMember(members[i])) readable.Add(members[i]);
+                }
+                cached = readable.ToArray();
+                ReadableMemberCache[type] = cached;
+                return cached;
+            }
         }
 
         private static Type? GetMemberType(MemberInfo member)
@@ -284,7 +337,7 @@ namespace ItemShareFix
 
     internal static class RemoteOperationProbe
     {
-        public const string ExactApiContract = "RoR2.CharacterMaster.GetInRemoteOp() : System.Boolean";
+        public const string ExactApiContract = "RoR2.CharacterMaster.currentBodyHandlingConfig.DetermineCurrentPreset() == RemoteOperation";
 
         private sealed class RuntimeShapeStatus
         {
@@ -325,7 +378,9 @@ namespace ItemShareFix
 
             try
             {
-                var exactSignal = master.GetInRemoteOp();
+                var config = master.currentBodyHandlingConfig;
+                var exactSignal = master.hasBodyHandlingConfig && config != null
+                    && config.DetermineCurrentPreset() == BodyHandlingPresetIndex.RemoteOperation;
                 var accepted = RemoteOperationSignalPolicy.ShouldClassifySupportDrone(
                     authoritativeMasterMatches: true,
                     runtimeShapeCompatible: true,
@@ -333,7 +388,7 @@ namespace ItemShareFix
                     exactSignalValue: exactSignal);
                 evidence = ExactApiContract
                     + "; authoritativeMasterOwnership=ReferenceEquals(controller.master, master)"
-                    + "; CharacterMaster.GetInRemoteOp()=" + (exactSignal ? "true" : "false");
+                    + "; exactRemoteOperationPreset=" + (exactSignal ? "true" : "false");
                 return accepted;
             }
             catch (Exception ex)
@@ -351,22 +406,28 @@ namespace ItemShareFix
         {
             try
             {
-                var method = typeof(CharacterMaster).GetMethod(
-                    "GetInRemoteOp",
+                var configProperty = typeof(CharacterMaster).GetProperty("currentBodyHandlingConfig", BindingFlags.Instance | BindingFlags.Public);
+                var hasConfigProperty = typeof(CharacterMaster).GetProperty("hasBodyHandlingConfig", BindingFlags.Instance | BindingFlags.Public);
+                var method = typeof(BodyHandlingConfig).GetMethod(
+                    "DetermineCurrentPreset",
                     BindingFlags.Instance | BindingFlags.Public,
                     binder: null,
                     types: Type.EmptyTypes,
                     modifiers: null);
-                var compatible = method != null
+                var compatible = configProperty?.PropertyType == typeof(BodyHandlingConfig)
+                    && configProperty.GetGetMethod() != null
+                    && hasConfigProperty?.PropertyType == typeof(bool)
+                    && hasConfigProperty.GetGetMethod() != null
+                    && method != null
                     && !method.IsStatic
                     && !method.ContainsGenericParameters
-                    && method.ReturnType == typeof(bool)
+                    && method.ReturnType == typeof(BodyHandlingPresetIndex)
                     && method.GetParameters().Length == 0;
                 return new RuntimeShapeStatus
                 {
                     Compatible = compatible,
                     Evidence = compatible
-                        ? ExactApiContract + "; runtimeShape=PASS(public instance, zero parameters, Boolean return)"
+                        ? ExactApiContract + "; runtimeShape=PASS(public config getters, zero parameters, exact preset return)"
                         : ExactApiContract + "; runtimeShape=FAIL(incompatible or missing member)",
                 };
             }
@@ -383,15 +444,24 @@ namespace ItemShareFix
 
     internal static class LocalParticipantResolver
     {
+        private static readonly Type? LocalUserManagerType = typeof(Run).Assembly.GetType("RoR2.LocalUserManager", false);
+        private static readonly MemberInfo? LocalUsersMember = ResolveLocalUsersMember();
+
         public static IReadOnlyList<CharacterMaster> GetLocalMasters()
         {
             var result = new List<CharacterMaster>();
-            var localUserManager = typeof(Run).Assembly.GetType("RoR2.LocalUserManager", false);
-            if (localUserManager == null) return result;
+            FillLocalMasters(result);
+            return result;
+        }
 
-            object? users = localUserManager.GetProperty("readOnlyLocalUsersList", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null)
-                            ?? localUserManager.GetField("readOnlyLocalUsersList", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null);
-            if (users is not IEnumerable enumerable) return result;
+        public static void FillLocalMasters(List<CharacterMaster> result)
+        {
+            if (result == null) throw new ArgumentNullException(nameof(result));
+            result.Clear();
+            if (LocalUsersMember == null) return;
+
+            object? users = ReadStaticMember(LocalUsersMember);
+            if (users is not IEnumerable enumerable) return;
 
             foreach (var localUser in enumerable)
             {
@@ -400,7 +470,6 @@ namespace ItemShareFix
                              ?? ParticipantIdentityResolver.GetMember(localUser, "master") as CharacterMaster;
                 if (master != null && !result.Contains(master)) result.Add(master);
             }
-            return result;
         }
 
         public static ParticipantState ClassifyLocal(CharacterMaster master)
@@ -410,13 +479,43 @@ namespace ItemShareFix
 
             CharacterBody? body = null;
             try { body = master.GetBody(); } catch { }
-            var controller = PlayerCharacterMasterController.instances.FirstOrDefault(x => x != null && ReferenceEquals(x.master, master));
+            PlayerCharacterMasterController? controller = null;
+            foreach (var candidate in PlayerCharacterMasterController.instances)
+            {
+                if (candidate == null || !ReferenceEquals(candidate.master, master)) continue;
+                controller = candidate;
+                break;
+            }
             var exactRemoteOperation = controller != null
                 && RemoteOperationProbe.HasExactControlledDroneSignal(controller, master, body, out _);
             return LocalParticipantPresentationPolicy.Classify(
                 masterAvailable: true,
                 exactRemoteOperationSignal: exactRemoteOperation,
                 bodyPresent: body != null);
+        }
+
+        private static MemberInfo? ResolveLocalUsersMember()
+        {
+            if (LocalUserManagerType == null) return null;
+            return (MemberInfo?)LocalUserManagerType.GetProperty(
+                       "readOnlyLocalUsersList",
+                       BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                   ?? LocalUserManagerType.GetField(
+                       "readOnlyLocalUsersList",
+                       BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        }
+
+        private static object? ReadStaticMember(MemberInfo member)
+        {
+            try
+            {
+                if (member is PropertyInfo property && property.GetIndexParameters().Length == 0) return property.GetValue(null);
+                if (member is FieldInfo field) return field.GetValue(null);
+            }
+            catch
+            {
+            }
+            return null;
         }
     }
 }

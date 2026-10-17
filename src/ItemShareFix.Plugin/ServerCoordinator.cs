@@ -11,8 +11,9 @@ namespace ItemShareFix
 {
     internal sealed class ServerCoordinator
     {
-        private sealed class DistributionContext
+        internal sealed class DistributionContext
         {
+            public bool TracksClaims = true;
             public SharedPickupKey Pickup;
             public PickupDef? PickupDef;
             public object? BoxedUniquePickup;
@@ -41,7 +42,7 @@ namespace ItemShareFix
         private readonly Dictionary<ParticipantKey, ParticipantSnapshot> _participants = new Dictionary<ParticipantKey, ParticipantSnapshot>();
         private readonly Dictionary<ParticipantKey, float> _missingSince = new Dictionary<ParticipantKey, float>();
         private readonly Dictionary<ClaimKey, DeferredGrantPayload> _deferredPayloads = new Dictionary<ClaimKey, DeferredGrantPayload>();
-        private readonly Stack<DistributionContext> _distribution = new Stack<DistributionContext>();
+        private readonly OwnedContextStack<DistributionContext> _distribution = new OwnedContextStack<DistributionContext>();
         private readonly Dictionary<int, float> _pendingTransferRebroadcast = new Dictionary<int, float>();
         private readonly Dictionary<ClaimKey, float> _pendingHistoricalMirrorRetry = new Dictionary<ClaimKey, float>();
         private readonly Dictionary<uint, GenerationProbeGate> _generationProbes = new Dictionary<uint, GenerationProbeGate>();
@@ -55,8 +56,12 @@ namespace ItemShareFix
         private float _nextParticipantSweep;
         private float _lastStageChangeTime;
         private Run? _runInstance;
+        private readonly SharedEligibilityCache<Component, PickupDef> _sharedEligibility = new SharedEligibilityCache<Component, PickupDef>();
+        private readonly EligibilityNetworkSync _eligibilitySync;
+        private float _nextEligibilityPrune;
         private int _stage;
         private int _deferredGrantDepth;
+        private int _c2DistributionSweepDepth;
 
         public ServerCoordinator(PluginConfig config, UpstreamBridge upstream, ManualLogSource log)
         {
@@ -67,6 +72,7 @@ namespace ItemShareFix
             _runInstance = Run.instance;
             _stage = CurrentStageToken();
             _lastStageChangeTime = Time.unscaledTime;
+            _eligibilitySync = new EligibilityNetworkSync(this, config, log);
         }
 
         public IReadOnlyCollection<ParticipantSnapshot> CurrentParticipants => _participants.Values;
@@ -74,10 +80,119 @@ namespace ItemShareFix
         public bool InDistribution => _distribution.Count > 0;
         public bool InDeferredGrant => _deferredGrantDepth > 0;
         public bool ShareTemporaryItemsEnabled => _config.ShareTemporaryItems.Value;
+        public bool KnownProgressionPickupExclusionsEnabled => _config.Enabled.Value;
+
+        private DlcSharingSettings ReadDlcSharingSettings()
+            => new DlcSharingSettings(_config.ShareHallowedItems.Value, _config.ShareHexItems.Value, _config.ShareNTormatPages.Value);
+
+        public bool IsDlcPickupShareable(PickupDef def)
+            => IsDlcPickupShareable(def, ReadDlcSharingSettings());
+
+        private bool IsDlcPickupShareable(PickupDef def, DlcSharingSettings settings)
+        {
+            if (!_config.Enabled.Value || def == null || def.itemIndex == ItemIndex.None) return false;
+            var item = ItemCatalog.GetItemDef(def.itemIndex);
+            if (item == null) return false;
+            var kind = item.tier == ItemTier.Cursed ? DlcPickupKind.Hallowed
+                : item.tier == ItemTier.Hex ? DlcPickupKind.Hex
+                : item.tier == ItemTier.Page ? DlcPickupKind.Page : DlcPickupKind.Other;
+            if (kind == DlcPickupKind.Other) return false;
+            if (!settings.Allows(kind)) return false;
+            var activePageSpell = false;
+            if (kind == DlcPickupKind.Page)
+            {
+                var spell = CursedBookSpellCatalog.GetCursedBookSpellDef(CursedBookSpellCatalog.FindSpellByItemIndex(item));
+                activePageSpell = spell != null && spell.itemDef != null && spell.itemDef.itemIndex == item.itemIndex;
+            }
+            return DlcPickupSharingPolicy.CanShare(kind, settings, item.hidden, item.isConsumed,
+                item.ContainsTag(ItemTag.WorldUnique), item.ContainsTag(ItemTag.ObjectiveRelated),
+                KnownProgressionPickupCompatibility.IsExcluded(def), activePageSpell);
+        }
+
+        private SharedEligibilityCache<Component, PickupDef>.Entry EligibilityFor(Component owner, bool alreadyShared)
+        {
+            _sharedEligibility.EnsureEpoch(Run.instance);
+            return _sharedEligibility.For(owner.GetInstanceID(), owner, alreadyShared);
+        }
+
+        public void PrepareSharingPolicy(GenericPickupController pickup, bool alreadyShared)
+        {
+            var policy = EligibilityFor(pickup, alreadyShared);
+            var def = PickupCatalog.GetPickupDef(pickup.pickup.pickupIndex);
+            if (def != null && !KnownProgressionPickupCompatibility.IsExcluded(def))
+                policy.Options.Observe(def, alreadyShared, _upstream.IsShareable(def));
+        }
+
+        public void PrepareSharingPolicy(PickupPickerController picker, bool alreadyShared)
+        {
+            var policy = EligibilityFor(picker, alreadyShared);
+            foreach (var option in picker.options)
+            {
+                if (!option.available) continue;
+                var def = PickupCatalog.GetPickupDef(option.pickup.pickupIndex);
+                if (def != null && !KnownProgressionPickupCompatibility.IsExcluded(def))
+                    policy.Options.Observe(def, alreadyShared, _upstream.IsShareable(def));
+            }
+        }
+
+        public bool CanRetainSharedPickup(Component owner, PickupDef def)
+        {
+            if (!_config.Enabled.Value || owner == null || def == null || KnownProgressionPickupCompatibility.IsExcluded(def)) return false;
+            _sharedEligibility.EnsureEpoch(Run.instance);
+            return NetworkServer.active
+                ? _sharedEligibility.TryGet(owner.GetInstanceID(), owner, out var policy) && policy.Options.Contains(def)
+                : _eligibilitySync.Contains(owner, def);
+        }
+
+        public void ObserveLocalSharingOption(Component owner, PickupDef def, bool alreadyShared, bool currentlyShareable)
+        {
+            if (NetworkServer.active || owner == null) return;
+            if (currentlyShareable && !_eligibilitySync.HasRetainedOptions(owner)) return;
+            // Local config/observation history cannot prove a retained server option.
+            _eligibilitySync.Observe(owner);
+        }
+
+        public void ReleaseSharingPolicy(int instanceId) => _sharedEligibility.Remove(instanceId);
+
+        internal IEnumerable<PickupDef> RetainedOptions(Component owner)
+        {
+            _sharedEligibility.EnsureEpoch(Run.instance);
+            var started = owner is GenericPickupController pickup ? _upstream.HasStartedSharing(pickup)
+                : owner is PickupPickerController picker && _upstream.HasStartedCommandSharing(picker);
+            if (!started) return Array.Empty<PickupDef>();
+            return _sharedEligibility.TryGet(owner.GetInstanceID(), owner, out var policy)
+                ? policy.Options.Allowed : Array.Empty<PickupDef>();
+        }
+
+        internal uint[] CollectedMasterIds(Component owner) => _upstream.ServerCollectedMasterIds(owner);
+        internal bool TryGetSnapshotCollected(Component owner, uint master, out bool collected)
+        {
+            collected = false;
+            if (!_eligibilitySync.HasRetainedOptions(owner)) return false;
+            if (owner is GenericPickupController pickup)
+            {
+                var def = PickupCatalog.GetPickupDef(pickup.pickup.pickupIndex);
+                if (def == null || !_eligibilitySync.Contains(owner, def)) return false;
+            }
+            return _eligibilitySync.TryCollected(owner, master, out collected);
+        }
+
+        public void Dispose()
+        {
+            try { _eligibilitySync.Dispose(); }
+            finally
+            {
+                _sharedEligibility.Clear();
+                _distribution.Clear();
+                _ledger.Clear();
+                _participants.Clear();
+                _deferredPayloads.Clear();
+            }
+        }
 
         public void LogTemporaryPolicy(string kind, int instanceId, bool shareTemporaryItems, string action, string reason)
         {
-            if (!_config.DiagnosticLogging.Value) return;
+            if (!_config.DiagnosticInfoEnabled) return;
             var key = kind + "|" + instanceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 + "|shareTemporary=" + shareTemporaryItems + "|action=" + action + "|reason=" + reason;
             if (!_temporaryPolicyDiagnosticLogged.Add(key)) return;
@@ -92,6 +207,15 @@ namespace ItemShareFix
 
         public void Tick()
         {
+            _sharedEligibility.EnsureEpoch(Run.instance);
+            _eligibilitySync.Tick();
+            if (Time.unscaledTime >= _nextEligibilityPrune)
+            {
+                _nextEligibilityPrune = Time.unscaledTime + 1f;
+                _sharedEligibility.Prune(owner => owner != null);
+            }
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticInfoEnabled);
+            C2HitchDiagnostics.FlushIfReady(_log);
             if (!_config.Enabled.Value || !NetworkServer.active) return;
             var currentRun = Run.instance;
             if (!ReferenceEquals(currentRun, _runInstance))
@@ -108,11 +232,21 @@ namespace ItemShareFix
             TryGrantDeferred();
         }
 
-        public void BeginDistribution(object[] args, bool instant)
+        public OwnedContextStack<DistributionContext>.Lease? BeginDistribution(object[] args, bool instant)
         {
-            if (!_config.Enabled.Value || !NetworkServer.active) return;
+            if (!_config.Enabled.Value || !NetworkServer.active) return null;
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticInfoEnabled);
+            var c2Timing = C2HitchDiagnostics.Begin(
+                C2HitchPhase.ServerBeginDistribution,
+                participantCount: _participants.Count,
+                claimCount: _ledger.Records.Count);
+            try
+            {
             var pickup = args.OfType<GenericPickupController>().FirstOrDefault();
-            if (pickup == null || !_upstream.IsShareable(pickup)) return;
+            if (pickup == null
+                || KnownProgressionPickupCompatibility.IsExcluded(pickup)
+                || !_upstream.IsShareable(pickup))
+                return _distribution.Enter(new DistributionContext { TracksClaims = false });
             var collectorBody = args.OfType<CharacterBody>().FirstOrDefault();
             var pickupDef = args.OfType<PickupDef>().FirstOrDefault() ?? PickupCatalog.GetPickupDef(pickup.pickup.pickupIndex);
             var context = new DistributionContext
@@ -123,16 +257,26 @@ namespace ItemShareFix
                 Collector = collectorBody != null ? collectorBody.master : null,
                 Instant = instant,
             };
-            _distribution.Push(context);
-            EnsureClaims(context);
+            return _distribution.Enter(context, EnsureClaims);
+                    }
+            finally
+            {
+                C2HitchDiagnostics.End(
+                    c2Timing,
+                    participantCount: _participants.Count,
+                    claimCount: _ledger.Records.Count);
+            }
+}
+
+        public void EndDistribution(OwnedContextStack<DistributionContext>.Lease scope, bool successful)
+        {
+            if (!successful || !NetworkServer.active) { scope.Dispose(); return; }
+            scope.Complete(CompleteDistribution);
         }
 
-        public void EndDistribution(bool successful)
+        private void CompleteDistribution(DistributionContext context)
         {
-            if (!NetworkServer.active || _distribution.Count == 0) return;
-            var context = _distribution.Pop();
-            if (!successful) return;
-
+            if (!context.TracksClaims) return;
             if (context.Instant)
             {
                 foreach (var participant in _participants.Values)
@@ -182,7 +326,7 @@ namespace ItemShareFix
 
         public void OnItemShareCommandSelectionCompleted(PickupPickerController picker)
         {
-            if (!_config.Enabled.Value || !NetworkServer.active) return;
+            if (!_config.Enabled.Value || !NetworkServer.active || !_config.DiagnosticInfoEnabled) return;
             if (picker is not PickupPickerController livePicker) return;
             if (!livePicker || !_upstream.IsCommandCube(livePicker)) return;
 
@@ -238,6 +382,7 @@ namespace ItemShareFix
             }
 
             var context = _distribution.Peek();
+            if (!context.TracksClaims) return false;
             var historicalBarrier = _ledger.IsHistoricallyBlocked(context.Pickup, participant.Key.StableUser);
             var participantState = CanUseExactParticipantState(participant) ? participant.State : (ParticipantState?)null;
             var deferredEntitlementReady = _ledger.TryGet(context.Pickup, participant.Key, out var currentClaim)
@@ -254,9 +399,21 @@ namespace ItemShareFix
         public void OnPickupTransferred(int oldInstanceId, int newInstanceId)
         {
             if (!_config.Enabled.Value || !NetworkServer.active || oldInstanceId == 0 || newInstanceId == 0 || oldInstanceId == newInstanceId) return;
+            _sharedEligibility.EnsureEpoch(Run.instance);
             try
             {
                 _ledger.TransferPickup(new SharedPickupKey(oldInstanceId), new SharedPickupKey(newInstanceId));
+                if (_sharedEligibility.TryGetLive(oldInstanceId, owner => owner != null && owner.GetInstanceID() == oldInstanceId, out var oldPolicy))
+                {
+                    var transferred = InstanceTracker.GetInstancesList<GenericPickupController>()
+                        .FirstOrDefault(pickup => pickup != null && pickup.GetInstanceID() == newInstanceId);
+                    if (transferred != null)
+                    {
+                        var nextPolicy = EligibilityFor(transferred, alreadyShared: true);
+                        foreach (var def in oldPolicy.Options.Allowed) nextPolicy.Options.Observe(def, true, true);
+                    }
+                    _sharedEligibility.Remove(oldInstanceId);
+                }
                 foreach (var pair in _deferredPayloads.Where(x => x.Key.Pickup.Value == oldInstanceId).ToArray())
                 {
                     _deferredPayloads.Remove(pair.Key);
@@ -339,7 +496,7 @@ namespace ItemShareFix
             bool authoritativePresence,
             string reason)
         {
-            if (!_config.DiagnosticLogging.Value) return;
+            if (!_config.DiagnosticInfoEnabled) return;
             var diagnosticKey = participant.Key.Value + "|" + eventName + "|" + decision + "|" + destroyedRuntimeType + "|" + authoritativePresence;
             if (!_disconnectGateDiagnosticLogged.Add(diagnosticKey)) return;
             _log.LogInfo(
@@ -356,7 +513,22 @@ namespace ItemShareFix
 
         private void EnsureClaims(DistributionContext context)
         {
-            SweepParticipants();
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticInfoEnabled);
+            var c2Timing = C2HitchDiagnostics.Begin(
+                C2HitchPhase.ServerEnsureClaims,
+                participantCount: _participants.Count,
+                claimCount: _ledger.Records.Count);
+            try
+            {
+                _c2DistributionSweepDepth++;
+                try
+                {
+                    SweepParticipants();
+                }
+                finally
+                {
+                    _c2DistributionSweepDepth--;
+                }
             foreach (var participant in _participants.Values)
             {
                 if (!CanCreateClaims(participant)) continue;
@@ -387,10 +559,29 @@ namespace ItemShareFix
                     };
                 }
             }
-        }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(
+                    c2Timing,
+                    participantCount: _participants.Count,
+                    claimCount: _ledger.Records.Count);
+            }
+}
 
         private void SweepParticipants()
         {
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticInfoEnabled);
+            var c2Phase = _c2DistributionSweepDepth > 0
+                ? C2HitchPhase.ServerSweepParticipantsDistribution
+                : C2HitchPhase.ServerSweepParticipantsPeriodic;
+            var c2Timing = C2HitchDiagnostics.Begin(
+                c2Phase,
+                participantCount: _participants.Count,
+                claimCount: _ledger.Records.Count);
+            try
+            {
+
             var seen = new HashSet<ParticipantKey>();
             foreach (var controller in PlayerCharacterMasterController.instances)
             {
@@ -453,7 +644,7 @@ namespace ItemShareFix
                 if (wasFrozen)
                 {
                     _identityDiagnosticLogged.Remove("frozen:" + snapshot.Key.Value);
-                    if (_config.DiagnosticLogging.Value)
+                    if (_config.DiagnosticInfoEnabled)
                         _log.LogInfo("[ItemShareFix] participant probe RECOVERED same generation " + snapshot.Key + "; preserved claims/deferred state resumed without recreation.");
                 }
 
@@ -566,7 +757,15 @@ namespace ItemShareFix
                 }
                 CancelParticipant(key, "participant absent from authoritative controller list");
             }
-        }
+                    }
+            finally
+            {
+                C2HitchDiagnostics.End(
+                    c2Timing,
+                    participantCount: _participants.Count,
+                    claimCount: _ledger.Records.Count);
+            }
+}
 
         private bool TryResolveFreshItemShareParticipant(
             CharacterMaster master,
@@ -616,7 +815,7 @@ namespace ItemShareFix
             bool correctedIsDown,
             string reason)
         {
-            if (!_config.DiagnosticLogging.Value) return;
+            if (!_config.DiagnosticInfoEnabled) return;
             var snapshot = freshSnapshot ?? participant;
             var participantToken = snapshot != null ? snapshot.Key.Value : "unresolved";
             var generationToken = snapshot != null ? SanitizeDiagnosticToken(snapshot.Key.Generation) : "unresolved";
@@ -652,12 +851,12 @@ namespace ItemShareFix
             if (participant.Master == null) return;
             if (_upstream.TryMirrorHistoricalBarrier(pickup.Value, participant.Master, out var evidence))
             {
-                if (_config.DiagnosticLogging.Value)
+                if (_config.DiagnosticInfoEnabled)
                     _log.LogInfo("[ItemShareFix] reconnect historical barrier " + pickup + "/" + participant.Key + ": " + evidence);
                 return;
             }
             _pendingHistoricalMirrorRetry[new ClaimKey(pickup, participant.Key)] = Time.unscaledTime + 0.25f;
-            if (_config.DiagnosticLogging.Value)
+            if (_config.DiagnosticInfoEnabled)
                 _log.LogWarning("[ItemShareFix] reconnect historical barrier pending " + pickup + "/" + participant.Key + ": " + evidence);
         }
 
@@ -684,7 +883,7 @@ namespace ItemShareFix
                 _pendingHistoricalMirrorRetry.Remove(pending);
             if (masterNetId != 0u) _generationProbes.Remove(masterNetId);
             _classifier.Forget(key);
-            if (_config.DiagnosticLogging.Value) _log.LogInfo("[ItemShareFix] participant DISCONNECTED " + key + " reason=" + reason);
+            if (_config.DiagnosticInfoEnabled) _log.LogInfo("[ItemShareFix] participant DISCONNECTED " + key + " reason=" + reason);
         }
 
         private void TryGrantDeferred()
@@ -715,7 +914,7 @@ namespace ItemShareFix
                             continue;
                         }
                         _deferredPayloads.Remove(record.Key);
-                        if (_config.DiagnosticLogging.Value) _log.LogInfo("[ItemShareFix] granted deferred entitlement " + record.Key);
+                        if (_config.DiagnosticInfoEnabled) _log.LogInfo("[ItemShareFix] granted deferred entitlement " + record.Key);
                     }
                     catch (Exception ex)
                     {
@@ -793,18 +992,22 @@ namespace ItemShareFix
             _itemShareActiveGateDiagnosticLogged.Clear();
             _commandRetentionDiagnosticLogged.Clear();
             _temporaryPolicyDiagnosticLogged.Clear();
+            _sharedEligibility.Clear();
+            _sharedEligibility.EnsureEpoch(currentRun);
+            _nextEligibilityPrune = 0f;
             _classifier.Reset();
             _deferredGrantDepth = 0;
             _nextParticipantSweep = 0f;
             _stage = CurrentStageToken();
             _lastStageChangeTime = Time.unscaledTime;
-            if (_config.DiagnosticLogging.Value)
+            if (_config.DiagnosticInfoEnabled)
                 _log.LogInfo("[ItemShareFix] run boundary reset old=" + (oldRun == null ? "<null>" : oldRun.GetInstanceID().ToString(System.Globalization.CultureInfo.InvariantCulture))
                              + " new=" + (currentRun == null ? "<null>" : currentRun.GetInstanceID().ToString(System.Globalization.CultureInfo.InvariantCulture)));
         }
 
         private void OnStageTransition(int newStage)
         {
+            _sharedEligibility.Prune(owner => owner != null);
             _stage = newStage;
             _lastStageChangeTime = Time.unscaledTime;
             _ledger.OnStageTransition(newStage);
@@ -817,7 +1020,7 @@ namespace ItemShareFix
             _pendingHistoricalMirrorRetry.Clear();
             _claimEnsureDiagnosticLogged.Clear();
             _temporaryPolicyDiagnosticLogged.Clear();
-            if (_config.DiagnosticLogging.Value) _log.LogInfo("[ItemShareFix] stage transition token=" + newStage);
+            if (_config.DiagnosticInfoEnabled) _log.LogInfo("[ItemShareFix] stage transition token=" + newStage);
         }
 
         private void RetryTransferBroadcasts()
@@ -847,20 +1050,20 @@ namespace ItemShareFix
                 if (_upstream.TryMirrorHistoricalBarrier(pair.Key.Pickup.Value, participant.Master, out var evidence))
                 {
                     _pendingHistoricalMirrorRetry.Remove(pair.Key);
-                    if (_config.DiagnosticLogging.Value)
+                    if (_config.DiagnosticInfoEnabled)
                         _log.LogInfo("[ItemShareFix] reconnect historical barrier retry PASS " + pair.Key + ": " + evidence);
                     continue;
                 }
 
                 _pendingHistoricalMirrorRetry[pair.Key] = Time.unscaledTime + 0.25f;
-                if (_config.DiagnosticLogging.Value)
+                if (_config.DiagnosticInfoEnabled)
                     _log.LogDebug("[ItemShareFix] reconnect historical barrier retry pending " + pair.Key + ": " + evidence);
             }
         }
 
         private void LogTransition(ParticipantKey key, ParticipantState from, ParticipantState to, string evidence)
         {
-            if (_config.DiagnosticLogging.Value) _log.LogInfo("[ItemShareFix] participant " + key + " " + from + " -> " + to + " (" + evidence + ")");
+            if (_config.DiagnosticInfoEnabled) _log.LogInfo("[ItemShareFix] participant " + key + " " + from + " -> " + to + " (" + evidence + ")");
         }
 
         private void LogParticipantClaimSnapshot(
@@ -872,7 +1075,7 @@ namespace ItemShareFix
             ParticipantState to,
             string participantEvidence)
         {
-            if (!_config.DiagnosticLogging.Value) return;
+            if (!_config.DiagnosticInfoEnabled) return;
             foreach (var record in _ledger.Records.Where(x => x.Key.Participant.Equals(participant)).OrderBy(x => x.Key.Pickup.Value))
             {
                 LogClaimState(record, participantState, action, reason, participantEvidence, from, to);
@@ -888,7 +1091,7 @@ namespace ItemShareFix
             ParticipantState? from = null,
             ParticipantState? to = null)
         {
-            if (!_config.DiagnosticLogging.Value) return;
+            if (!_config.DiagnosticInfoEnabled) return;
             var transition = from.HasValue && to.HasValue
                 ? " from=" + from.Value + " to=" + to.Value
                 : string.Empty;
@@ -905,16 +1108,7 @@ namespace ItemShareFix
         }
 
         private static string ExactRemoteOperationDiagnostic(string participantEvidence)
-        {
-            const string marker = "CharacterMaster.GetInRemoteOp()=";
-            if (string.IsNullOrEmpty(participantEvidence)) return "not-probed";
-            var markerIndex = participantEvidence.IndexOf(marker, StringComparison.Ordinal);
-            if (markerIndex < 0) return "not-probed-classifier-order";
-            var valueIndex = markerIndex + marker.Length;
-            if (participantEvidence.IndexOf("true", valueIndex, StringComparison.Ordinal) == valueIndex) return "true";
-            if (participantEvidence.IndexOf("false", valueIndex, StringComparison.Ordinal) == valueIndex) return "false";
-            return "unavailable-fail-closed";
-        }
+            => DiagnosticPolicy.ExactRemoteOperation(participantEvidence);
 
         private static string SanitizeDiagnosticToken(string value)
         {

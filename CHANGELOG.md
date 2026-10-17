@@ -1,5 +1,38 @@
 # Changelog
 
+## Version 1.2.0
+
+- Updated compatibility with Risk of Rain 2 and the Hallowed Concepts DLC.
+- Reworked the item marker system, improving performance and the display of large numbers of markers.
+- Added item sharing support for Hallowed, Hex, and N'Tormat Pages. Sharing is disabled by default for these new item types and can be enabled individually through the mod configuration or Risk of Options.
+- Fixed compatibility with Belmont and HUNK: special items required for character progression are no longer shared with other players.
+
+## 1.1.1
+
+### Hallowed Concepts compatibility
+
+- Updated Remote Operation / Support Drone detection for the Risk of Rain 2 1.5.0 API.
+- Added independent OFF-by-default sharing controls for Hallowed items, Hex items and active N'Tormat Pages, including Risk Of Options integration.
+- Sharing controls now apply during a run. Already-started shared objects retain eligible pending shares; completed shares are never granted retroactively.
+- Added explicit DLC Command categories, localized labels for all 11 supported languages and native category text colors.
+
+### Multiplayer and compatibility fixes
+
+- Fixed excluded Belmont/HUNK progression choices receiving ItemShareFix markers or entering Command sharing (Correction14).
+- Made distribution scopes owned by their exact invocation, including nested calls and exception cleanup.
+- Added server-authoritative presentation snapshots for eligible options and existing collectors, including late client observation. The metadata protocol never grants items or creates claims.
+- Hardened eligibility-cache lifetime, transfer validation and stale snapshot rejection.
+- Corrected Remote Operation diagnostic parsing and optional diagnostic log-level filtering.
+
+### Performance and maintenance
+
+- Bounded saturated HUD placement searches, removed per-probe HUD allocations and cached formatted text before TMP width measurements.
+- Added live controls to hide markers in DLC4 gong trials and automatically declutter crowded screens, with a configurable 4–16 group limit and focused detail expansion.
+- Preserved cold Command prewarming, typed upstream shareability calls and buffered marker layout.
+- Reused presentation buffers and cached recurring reflection metadata to reduce allocation churn.
+- Removed unused private HUD discovery and lifetime-summary branches.
+- Expanded regression checks for DLC compatibility, progression exclusions, marker performance and crowded-screen grouping.
+
 ## 1.1.0
 
 ### Risk Of Options integration

@@ -10,7 +10,7 @@ namespace ItemShareFix
 {
     /// <summary>
     /// Local presentation probe. Cached RoR2 UI references are evaluated cheaply every frame, while expensive
-    /// Resources.FindObjectsOfTypeAll discovery is lifecycle/urgent-trigger driven with a rare bounded fallback.
+    /// global discovery runs only during initialization; exact lifecycle hooks seed later UI references.
     /// </summary>
     internal sealed class LocalHudPresentationProbe
     {
@@ -51,11 +51,6 @@ namespace ItemShareFix
         private readonly HashSet<int> _blockingModalIds = new HashSet<int>();
         private readonly List<MessageHudCandidate> _messageHudRoots = new List<MessageHudCandidate>();
         private readonly HashSet<int> _messageRootIds = new HashSet<int>();
-        private float _nextBlockingDiscovery;
-        private float _nextMessageDiscovery;
-        private bool _blockingLifecycleInvalidated = true;
-        private bool _messageLifecycleInvalidated = true;
-        private bool _lastPauseSignal;
 
         public LocalHudPresentationProbe(MarkerRuntimePerformanceCounters performance)
         {
@@ -69,15 +64,64 @@ namespace ItemShareFix
 
         public void InvalidateLifecycle()
         {
-            _blockingLifecycleInvalidated = true;
-            _messageLifecycleInvalidated = true;
-            _nextBlockingDiscovery = 0f;
-            _nextMessageDiscovery = 0f;
             _blockingModalComponents.Clear();
             _blockingModalIds.Clear();
             _messageHudRoots.Clear();
             _messageRootIds.Clear();
         }
+
+        /// <summary>
+        /// The only scene-wide discovery pass is allowed during plugin initialization, before gameplay input owns
+        /// an interactive frame. Later run/stage boundaries are repopulated by exact UI lifecycle observations.
+        /// </summary>
+        public void PrimeGlobalDiscoveryDuringInitialization()
+        {
+            _blockingModalComponents.Clear();
+            _blockingModalIds.Clear();
+            _messageHudRoots.Clear();
+            _messageRootIds.Clear();
+
+            for (var i = 0; i < _blockingModalTypes.Length; i++)
+                DiscoverBlockingModalType(_blockingModalTypes[i]);
+            for (var i = 0; i < _messageHudTypes.Length; i++)
+                DiscoverMessageHudType(_messageHudTypes[i]);
+            if (_messageHudRoots.Count == 0) DiscoverMessageHudFallback();
+
+        }
+
+        /// <summary>
+        /// Interactive warmup is intentionally scan-free. Exact lifecycle hooks seed modal/HUD candidates; marker
+        /// frames and idle gameplay frames only prune those bounded caches.
+        /// </summary>
+        public bool WarmColdPathStep(bool refreshIfDue)
+        {
+            PruneBlockingModalCandidates();
+            PruneMessageHudCandidates();
+            return true;
+        }
+
+        /// <summary>
+        /// Exact RoR2.UI.HUD lifecycle observation. This scans only the newly-created HUD hierarchy and never the
+        /// global Resources object table.
+        /// </summary>
+        public void ObserveHudLifecycle(Component? hud)
+        {
+            if (hud == null || hud.gameObject == null || !hud.gameObject.scene.IsValid()) return;
+            try
+            {
+                foreach (var candidate in hud.GetComponentsInChildren<RectTransform>(true))
+                {
+                    if (!LooksLikeMessageHud(candidate)) continue;
+                    AddMessageRoot(candidate);
+                }
+            }
+            catch
+            {
+                // Presentation probe is fail-open; a malformed HUD hierarchy must not alter gameplay/state.
+            }
+
+        }
+
 
         /// <summary>
         /// Immediate path: a Harmony lifecycle hook gives us the exact modal component that just became live.
@@ -98,14 +142,20 @@ namespace ItemShareFix
             }
 
             // The observed exact component is now sufficient for the next normal presentation update.
-            // Keep the rare fallback for genuinely missing/stale cache cases, but do not run it because of this transition.
-            _blockingLifecycleInvalidated = false;
-            _nextBlockingDiscovery = Time.unscaledTime + MarkerFramePipelinePolicy.BlockingModalFallbackDiscoverySeconds;
+            // No scene-wide fallback runs after initialization.
         }
 
         public bool TryGetBlockingModal(out string reason)
         {
-            RefreshBlockingModalCandidates();
+            // Runtime queries are cache-only; expensive global discovery is initialization-only in Correction8.
+            return TryGetBlockingModalCached(out reason);
+        }
+
+        // Marker-bearing frames remain cache-only. Global discovery runs during initialization;
+        // exact lifecycle hooks repopulate caches later. A cache miss fails open without a global scan.
+        public bool TryGetBlockingModalCached(out string reason)
+        {
+            PruneBlockingModalCandidates();
             for (var i = 0; i < _blockingModalComponents.Count; i++)
             {
                 var component = _blockingModalComponents[i];
@@ -125,7 +175,14 @@ namespace ItemShareFix
 
         public bool TryGetVisibleMessageHudRect(out MarkerHudRect rect)
         {
-            RefreshMessageHudCandidates();
+            // Runtime queries are cache-only; exact HUD lifecycle hooks keep this cache current.
+            return TryGetVisibleMessageHudRectCached(out rect);
+        }
+
+        // Same cache-only rule as modal probing: never run Resources.FindObjectsOfTypeAll from a marker frame.
+        public bool TryGetVisibleMessageHudRectCached(out MarkerHudRect rect)
+        {
+            PruneMessageHudCandidates();
             var found = false;
             var left = float.PositiveInfinity;
             var right = float.NegativeInfinity;
@@ -157,82 +214,44 @@ namespace ItemShareFix
             return rect.Width > 1f && rect.Height > 1f;
         }
 
-        private void RefreshBlockingModalCandidates()
+        private void DiscoverBlockingModalType(Type type)
         {
-            var pruned = PruneBlockingModalCandidates();
-            var pauseSignal = Time.timeScale <= 0.001f;
-            var urgent = pauseSignal != _lastPauseSignal;
-            _lastPauseSignal = pauseSignal;
-            urgent |= pruned;
-
-            var now = Time.unscaledTime;
-            if (!MarkerFramePipelinePolicy.ShouldRunGlobalUiDiscovery(
-                    _blockingLifecycleInvalidated,
-                    urgent,
-                    _blockingModalComponents.Count == 0,
-                    now,
-                    _nextBlockingDiscovery)) return;
-
-            _blockingLifecycleInvalidated = false;
-            _nextBlockingDiscovery = now + MarkerFramePipelinePolicy.BlockingModalFallbackDiscoverySeconds;
-            _blockingModalComponents.Clear();
-            _blockingModalIds.Clear();
             _performance.RecordGlobalHudDiscovery();
-            for (var i = 0; i < _blockingModalTypes.Length; i++)
+            try
             {
-                var type = _blockingModalTypes[i];
-                try
+                foreach (var instance in Resources.FindObjectsOfTypeAll(type))
                 {
-                    foreach (var instance in Resources.FindObjectsOfTypeAll(type))
-                    {
-                        if (instance is Component component && component.gameObject != null && component.gameObject.scene.IsValid())
-                            AddBlockingModalCandidate(component);
-                    }
+                    if (instance is Component component && component.gameObject != null && component.gameObject.scene.IsValid())
+                        AddBlockingModalCandidate(component);
                 }
-                catch
-                {
-                    // Presentation probe is fail-open: unavailable UI reflection must not alter gameplay/state.
-                }
+            }
+            catch
+            {
+                // Presentation probe is fail-open: unavailable UI reflection must not alter gameplay/state.
             }
         }
 
-        private void RefreshMessageHudCandidates()
+        private void DiscoverMessageHudType(Type type)
         {
-            var pruned = PruneMessageHudCandidates();
-            var now = Time.unscaledTime;
-            if (!MarkerFramePipelinePolicy.ShouldRunGlobalUiDiscovery(
-                    _messageLifecycleInvalidated,
-                    pruned,
-                    _messageHudRoots.Count == 0,
-                    now,
-                    _nextMessageDiscovery)) return;
-
-            _messageLifecycleInvalidated = false;
-            _nextMessageDiscovery = now + MarkerFramePipelinePolicy.MessageHudFallbackDiscoverySeconds;
-            _messageHudRoots.Clear();
-            _messageRootIds.Clear();
             _performance.RecordGlobalHudDiscovery();
-
-            for (var i = 0; i < _messageHudTypes.Length; i++)
+            try
             {
-                var type = _messageHudTypes[i];
-                try
+                foreach (var instance in Resources.FindObjectsOfTypeAll(type))
                 {
-                    foreach (var instance in Resources.FindObjectsOfTypeAll(type))
-                    {
-                        if (!(instance is Component component) || component.gameObject == null || !component.gameObject.scene.IsValid()) continue;
-                        AddMessageRoot(component.transform as RectTransform);
-                    }
-                }
-                catch
-                {
-                    // Continue to rare bounded HUD/name discovery below.
+                    if (!(instance is Component component) || component.gameObject == null || !component.gameObject.scene.IsValid()) continue;
+                    AddMessageRoot(component.transform as RectTransform);
                 }
             }
+            catch
+            {
+                // Continue to bounded HUD/name fallback.
+            }
+        }
 
-            // Known concrete chat roots are authoritative. The HUD-tree fallback happens only on lifecycle/fallback
-            // discovery, never as continuous marker-active polling.
+        private void DiscoverMessageHudFallback()
+        {
             if (_messageHudRoots.Count > 0 || _hudType == null) return;
+            _performance.RecordGlobalHudDiscovery();
             try
             {
                 foreach (var instance in Resources.FindObjectsOfTypeAll(_hudType))
@@ -277,7 +296,7 @@ namespace ItemShareFix
             try { _messageHudRoots.Add(new MessageHudCandidate(root)); }
             catch
             {
-                // A transient/destroying UI tree is ignored until the next bounded discovery pass.
+                // A transient/destroying UI tree is ignored; a later exact HUD lifecycle observation can retry.
             }
         }
 

@@ -125,6 +125,39 @@ namespace ItemShareFix.Core
         }
     }
 
+    /// <summary>Per-view, single-entry cache checked before rich-text construction and TMP width probes.</summary>
+    public sealed class MarkerRenderedTextCache
+    {
+        private object? _plan;
+        private object? _cluster;
+        private MarkerMeasurementCacheKey _typography;
+        private float _width;
+        private string _text = string.Empty;
+
+        public bool TryGet(object plan, object cluster, MarkerMeasurementCacheKey typography, float width, out string text)
+        {
+            text = _text;
+            return _plan != null && ReferenceEquals(_plan, plan) && ReferenceEquals(_cluster, cluster)
+                && _typography.Equals(typography) && _width.Equals(width);
+        }
+
+        public void Store(object plan, object cluster, MarkerMeasurementCacheKey typography, float width, string text)
+        {
+            _plan = plan;
+            _cluster = cluster;
+            _typography = typography;
+            _width = width;
+            _text = text;
+        }
+
+        public void Clear()
+        {
+            _plan = null;
+            _cluster = null;
+            _text = string.Empty;
+        }
+    }
+
     public static class MarkerRuntimeHotPathPolicy
     {
         public static bool CanReuseMeasurement(

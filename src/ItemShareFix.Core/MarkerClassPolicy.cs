@@ -16,6 +16,9 @@ namespace ItemShareFix.Core
         Equipment,
         LunarEquipment,
         Other,
+        Hallowed,
+        Hex,
+        Page,
     }
 
     public readonly struct CommandClassPresentation
@@ -53,6 +56,9 @@ namespace ItemShareFix.Core
             if (string.Equals(tier, "Tier3", StringComparison.Ordinal)) return MarkerClassKind.Tier3;
             if (string.Equals(tier, "Boss", StringComparison.Ordinal)) return MarkerClassKind.Boss;
             if (string.Equals(tier, "Lunar", StringComparison.Ordinal)) return MarkerClassKind.Lunar;
+            if (string.Equals(tier, "Cursed", StringComparison.Ordinal)) return MarkerClassKind.Hallowed;
+            if (string.Equals(tier, "Hex", StringComparison.Ordinal)) return MarkerClassKind.Hex;
+            if (string.Equals(tier, "Page", StringComparison.Ordinal)) return MarkerClassKind.Page;
             if (tier.StartsWith("Void", StringComparison.Ordinal)) return MarkerClassKind.Void;
             if (string.IsNullOrWhiteSpace(tier) || string.Equals(tier, "NoTier", StringComparison.Ordinal)) return MarkerClassKind.Unknown;
             return MarkerClassKind.Other;
@@ -71,6 +77,9 @@ namespace ItemShareFix.Core
                 case MarkerClassKind.Equipment: return "EQUIPMENT";
                 case MarkerClassKind.LunarEquipment: return "LUNAR_EQUIPMENT";
                 case MarkerClassKind.Other: return "OTHER";
+                case MarkerClassKind.Hallowed: return "HALLOWED";
+                case MarkerClassKind.Hex: return "HEX";
+                case MarkerClassKind.Page: return "PAGE";
                 default: return "UNKNOWN";
             }
         }
@@ -191,19 +200,32 @@ namespace ItemShareFix.Core
         public static CommandClassPresentation ResolveCommandClassForReadablePresentation(IEnumerable<MarkerClassKind>? choiceClasses, MarkerLanguage language)
         {
             if (choiceClasses == null) return new CommandClassPresentation(MarkerClassKind.Unknown, LocalizedReadableClassLabel(MarkerClassKind.Unknown, language), false);
-            var all = choiceClasses.ToArray();
-            if (all.Length == 0 || all.Any(x => x == MarkerClassKind.Unknown))
+
+            var sawClass = false;
+            var resolvedKind = MarkerClassKind.Unknown;
+            foreach (var kind in choiceClasses)
+            {
+                if (kind == MarkerClassKind.Unknown)
+                    return new CommandClassPresentation(MarkerClassKind.Unknown, LocalizedReadableClassLabel(MarkerClassKind.Unknown, language), false);
+
+                if (!sawClass)
+                {
+                    sawClass = true;
+                    resolvedKind = kind;
+                    continue;
+                }
+
+                if (kind != resolvedKind)
+                    return new CommandClassPresentation(MarkerClassKind.Unknown, LocalizedReadableClassLabel(MarkerClassKind.Unknown, language), false);
+            }
+
+            if (!sawClass)
                 return new CommandClassPresentation(MarkerClassKind.Unknown, LocalizedReadableClassLabel(MarkerClassKind.Unknown, language), false);
 
-            var distinct = all.Distinct().ToArray();
-            if (distinct.Length != 1)
-                return new CommandClassPresentation(MarkerClassKind.Unknown, LocalizedReadableClassLabel(MarkerClassKind.Unknown, language), false);
-
-            var kind = distinct[0];
-            if (kind == MarkerClassKind.Other)
+            if (resolvedKind == MarkerClassKind.Other)
                 return new CommandClassPresentation(MarkerClassKind.Other, LocalizedReadableClassLabel(MarkerClassKind.Other, language), false);
 
-            return new CommandClassPresentation(kind, LocalizedReadableClassLabel(kind, language), true);
+            return new CommandClassPresentation(resolvedKind, LocalizedReadableClassLabel(resolvedKind, language), true);
         }
 
     }

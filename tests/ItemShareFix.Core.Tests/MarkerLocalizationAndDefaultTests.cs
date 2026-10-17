@@ -501,7 +501,10 @@ namespace ItemShareFix.Core.Tests
         {
             Assert.AreEqual(11, MarkerTextLocalization.OfficialLanguages.Length);
             var source = ReadSource("src/ItemShareFix.Core/MarkerTextLocalization.cs");
-            Assert.AreEqual(49, source.Split(new[] { "[\"" }, StringSplitOptions.None).Length - 1);
+            Assert.AreEqual(52, source.Split(new[] { "[\"" }, StringSplitOptions.None).Length - 1);
+            Assert.IsTrue(MarkerTextLocalization.ContainsKey("dlc.hallowed"));
+            Assert.IsTrue(MarkerTextLocalization.ContainsKey("dlc.hex"));
+            Assert.IsTrue(MarkerTextLocalization.ContainsKey("dlc.pages"));
             Assert.IsTrue(MarkerTextLocalization.ContainsKey("readable.white"));
             Assert.IsTrue(MarkerTextLocalization.ContainsKey("overflow.more_types_format"));
             Assert.IsTrue(MarkerTextLocalization.ContainsKey("distance.unit"));
@@ -538,10 +541,10 @@ namespace ItemShareFix.Core.Tests
         [TestMethod]
         public void ISF_V100_A2R1_LOC_36_TemporaryGameplaySemanticsRemainFrozen()
         {
-            Assert.AreEqual("AD4D04D530B3D7F14CE84D03C8D67ACACBA29D6E09E835608A49B9D262D6A506", SourceSha256("src/ItemShareFix.Plugin/RuntimePatches.cs"));
-            Assert.AreEqual("3EC43F2BFA9354D05F60F85164581C0E39C2AFAD4067049D5339ECF5E608BA23", SourceSha256("src/ItemShareFix.Plugin/ServerCoordinator.cs"));
+            C2HistoricalFreezeReconciliation.AssertRuntimePatchesCurrentAndC1Normalized();
+            C2HistoricalFreezeReconciliation.AssertServerCoordinatorCurrentAndC1Normalized();
             Assert.AreEqual("E9540487B1901827E3012AE5D7BA3A2C9C4C110EA97010245D4E54D236A85145", SourceSha256("src/ItemShareFix.Core/TemporarySharingPolicy.cs"));
-            Assert.AreEqual("43935D44596A14C91FAAF276357DD7CBBF5B226330835BE6BCF265B9531AD4A9", SourceSha256("src/ItemShareFix.Plugin/UpstreamBridge.cs"));
+            C2HistoricalFreezeReconciliation.AssertUpstreamBridgeCorrection8CurrentAndCorrection7Normalized();
         }
 
                 [TestMethod]

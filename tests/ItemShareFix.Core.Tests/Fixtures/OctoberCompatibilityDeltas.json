@@ -1,0 +1,128 @@
+[
+  {
+    "Path": "src/ItemShareFix.Plugin/RuntimePatches.cs",
+    "CurrentSha256": "345739DEE48BC9A7A1EED74B56CA26E8F4309127D10CFF72EB3C0F0534422ECD",
+    "HistoricalSha256": "9D62AE98B55D320F5059749DEE326B6C0A30A1288FD13B7B573579331AB786E5",
+    "Seams": [
+      {
+        "Current": "            if (_server.KnownProgressionPickupExclusionsEnabled\n                && KnownProgressionPickupCompatibility.IsExcluded(PickupCatalog.GetPickupDef(selectedPickup.pickupIndex)))\n            {\n                // Bypass before ItemShare creates Choices or gives an item directly.\n                // The supplied selection preserves the provider's progression callbacks.\n                __state = true;\n                InvokeSuppliedOriginal(__args[0], picker, choiceIndex);\n                return false;\n            }\n",
+        "Historical": ""
+      }
+    ]
+  },
+  {
+    "Path": "src/ItemShareFix.Core/CommandShareabilityPolicy.cs",
+    "CurrentSha256": "89737EB504DE20AE9D3ED9777AB7132728E463E8D38D24FF73D7C81379EA1007",
+    "HistoricalSha256": "633B47FB30B397A2F725ED9F0B7C2F9734983B0311278EFCF0BCC019453200AC",
+    "Seams": [
+      {
+        "Current": "        // Exact exclusions are removed from the candidate set, not treated as an\n        // ordinary upstream-unshareable option that would veto a mixed picker.\n        public static CommandShareabilityDecision Evaluate(IReadOnlyList<bool?> optionShareability, IReadOnlyList<bool> excludedOptions)\n        {\n            if (optionShareability.Count != excludedOptions.Count)\n                return new CommandShareabilityDecision(CommandShareabilityState.Unresolved);\n            var included = new List<bool?>(optionShareability.Count);\n            var excludedAny = false;\n            for (var i = 0; i < optionShareability.Count; i++)\n            {\n                if (excludedOptions[i]) excludedAny = true;\n                else included.Add(optionShareability[i]);\n            }\n            if (included.Count == 0 && excludedAny)\n                return new CommandShareabilityDecision(CommandShareabilityState.AllUnshareable);\n            return Evaluate(included);\n        }\n\n",
+        "Historical": ""
+      }
+    ]
+  },
+  {
+    "Path": "src/ItemShareFix.Plugin/ClientPresentation.cs",
+    "CurrentSha256": "D70D22897AD783E9E86F127CF4C304169BDD3C862C2AA928BB5F31D5940C8A11",
+    "HistoricalSha256": "312D7DC7C2F796114867A363039EF47D56BB1D51B5BE0B1447CA6A672024B35F",
+    "Seams": [
+      {
+        "Current": "            var excludedOptions = new bool[pickupIndexes.Length];\n            var includedClassCount = 0;\n",
+        "Historical": ""
+      },
+      {
+        "Current": "                    resolvedClasses[includedClassCount] = unknown.Kind;\n                    resolvedColors[includedClassCount++] = unknown.TextColor;",
+        "Historical": "                    resolvedClasses[optionIndex] = unknown.Kind;\n                    resolvedColors[optionIndex] = unknown.TextColor;"
+      },
+      {
+        "Current": "                if (exactSource && KnownProgressionPickupCompatibility.IsExcluded(def))\n                {\n                    excludedOptions[optionIndex] = true;\n                    if (profileActive) profilePickupMetadataTicks += System.Diagnostics.Stopwatch.GetTimestamp() - profilePickupMetadataStarted;\n                    continue;\n                }\n\n",
+        "Historical": ""
+      },
+      {
+        "Current": "                resolvedClasses[includedClassCount] = resolvedMetadata.Kind;\n                resolvedColors[includedClassCount++] = resolvedMetadata.TextColor;",
+        "Historical": "                resolvedClasses[optionIndex] = resolvedMetadata.Kind;\n                resolvedColors[optionIndex] = resolvedMetadata.TextColor;"
+      },
+      {
+        "Current": "            Array.Resize(ref resolvedClasses, includedClassCount);\n            Array.Resize(ref resolvedColors, includedClassCount);\n",
+        "Historical": ""
+      },
+      {
+        "Current": "                ? (includedClassCount == pickupIndexes.Length\n                    ? CommandShareabilityPolicy.Evaluate(upstreamShareability)\n                    : CommandShareabilityPolicy.Evaluate(upstreamShareability, excludedOptions))",
+        "Historical": "                ? CommandShareabilityPolicy.Evaluate(upstreamShareability)"
+      }
+    ]
+  },
+  {
+    "Path": "src/ItemShareFix.Plugin/ParticipantRuntime.cs",
+    "CurrentSha256": "A3C4A10D3CAEA1681ED973414F4FF6E9C4A99A4B742799CDE60A4487817DEC22",
+    "HistoricalSha256": "F1E661E84472F089C9F473757BF65ED12B784B6A8968EB8FE13E472CA9F3600A",
+    "Seams": [
+      {
+        "Current": "RoR2.CharacterMaster.currentBodyHandlingConfig.DetermineCurrentPreset() == RemoteOperation",
+        "Historical": "RoR2.CharacterMaster.GetInRemoteOp() : System.Boolean"
+      },
+      {
+        "Current": "                var config = master.currentBodyHandlingConfig;\n                var exactSignal = master.hasBodyHandlingConfig && config != null\n                    && config.DetermineCurrentPreset() == BodyHandlingPresetIndex.RemoteOperation;",
+        "Historical": "                var exactSignal = master.GetInRemoteOp();"
+      },
+      {
+        "Current": "; exactRemoteOperationPreset=",
+        "Historical": "; CharacterMaster.GetInRemoteOp()="
+      },
+      {
+        "Current": "                var configProperty = typeof(CharacterMaster).GetProperty(\"currentBodyHandlingConfig\", BindingFlags.Instance | BindingFlags.Public);\n                var hasConfigProperty = typeof(CharacterMaster).GetProperty(\"hasBodyHandlingConfig\", BindingFlags.Instance | BindingFlags.Public);\n                var method = typeof(BodyHandlingConfig).GetMethod(\n                    \"DetermineCurrentPreset\",",
+        "Historical": "                var method = typeof(CharacterMaster).GetMethod(\n                    \"GetInRemoteOp\","
+      },
+      {
+        "Current": "                var compatible = configProperty?.PropertyType == typeof(BodyHandlingConfig)\n                    && configProperty.GetGetMethod() != null\n                    && hasConfigProperty?.PropertyType == typeof(bool)\n                    && hasConfigProperty.GetGetMethod() != null\n                    && method != null",
+        "Historical": "                var compatible = method != null"
+      },
+      {
+        "Current": "method.ReturnType == typeof(BodyHandlingPresetIndex)",
+        "Historical": "method.ReturnType == typeof(bool)"
+      },
+      {
+        "Current": "runtimeShape=PASS(public config getters, zero parameters, exact preset return)",
+        "Historical": "runtimeShape=PASS(public instance, zero parameters, Boolean return)"
+      }
+    ]
+  },
+  {
+    "Path": "src/ItemShareFix.Plugin/ItemShareFix.Plugin.csproj",
+    "CurrentSha256": "1648FC2F33CE957269803901028252E3A4EC542914B9E7BAAF47068A17F121EC",
+    "HistoricalSha256": "363B261D2EF267E0396526D2370E26FCE90A096A3BCDFEF1EBD6C5F1849B996C",
+    "Seams": [
+      {
+        "Current": "<BepInExCoreDir Condition=\"'$(BepInExCoreDir)' == ''\">",
+        "Historical": "<BepInExCoreDir>"
+      }
+    ]
+  },
+  {
+    "Path": "src/ItemShareFix.Plugin/ItemShareFixPlugin.cs",
+    "CurrentSha256": "E53FC74E01E09A84DFA22815F6C4C19345D81D907CEF2BE508E3BFDE174D6A6F",
+    "HistoricalSha256": "F98D837A5C508D235F2A994AB55195320E48A47EBC3A1F3790D8F807856C94A6",
+    "Seams": [
+      {
+        "Current": "using RoR2;\n",
+        "Historical": ""
+      },
+      {
+        "Current": "        private UpstreamBridge? _catalogUpstream;\n        private bool _dlcCatalogLogged;\n",
+        "Historical": ""
+      },
+      {
+        "Current": "                _catalogUpstream = upstream;\n                RoR2Application.onLoad += LogDlcPickupCatalog;\n                if (RoR2Application.loadFinished) LogDlcPickupCatalog();\n",
+        "Historical": ""
+      },
+      {
+        "Current": "        private void LogDlcPickupCatalog()\n        {\n            if (_dlcCatalogLogged || !_active || _config == null) return;\n            _dlcCatalogLogged = true;\n            RoR2Application.onLoad -= LogDlcPickupCatalog;\n            if (!_config.DiagnosticLogging.Value\n                || (!string.Equals(_config.DiagnosticLogLevel.Value, \"Info\", StringComparison.OrdinalIgnoreCase)\n                    && !string.Equals(_config.DiagnosticLogLevel.Value, \"Debug\", StringComparison.OrdinalIgnoreCase))) return;\n            try\n            {\n                Logger.LogInfo(\"ISF_DLC4_CATALOG build=\" + RoR2Application.GetBuildId() + \" policy=upstream-authority\");\n                foreach (var itemIndex in ItemCatalog.allItems)\n                {\n                    var item = ItemCatalog.GetItemDef(itemIndex);\n                    if (item == null || (item.tier != ItemTier.Cursed && item.tier != ItemTier.Page && item.tier != ItemTier.Hex)) continue;\n                    var pickupIndex = PickupCatalog.FindPickupIndex(itemIndex);\n                    var def = PickupCatalog.GetPickupDef(pickupIndex);\n                    var tierDef = ItemTierCatalog.GetItemTierDef(item.tier);\n                    var shareable = def != null && _catalogUpstream != null && _catalogUpstream.TryIsShareable(def, out var value)\n                        ? value.ToString() : \"unresolved\";\n                    Logger.LogInfo(\"ISF_DLC4_ITEM name=\" + item.name + \" token=\" + item.nameToken\n                        + \" itemIndex=\" + (int)itemIndex + \" pickupIndex=\" + pickupIndex.value\n                        + \" tier=\" + item.tier + \" tags=\" + string.Join(\",\", item.tags ?? Array.Empty<ItemTag>())\n                        + \" expansion=\" + (item.requiredExpansion != null ? item.requiredExpansion.name : \"none\")\n                        + \" pickupRules=\" + (tierDef != null ? tierDef.pickupRules.ToString() : \"unresolved\")\n                        + \" upstreamShareable=\" + shareable);\n                }\n                var book = DLC4Content.KeyItems.CursedBook;\n                Logger.LogInfo(\"ISF_DLC4_BOOK name=\" + (book != null ? book.name : \"absent\")\n                    + \" keyItemIndex=\" + (book != null ? book.keyItemIndex.ToString() : \"none\"));\n            }\n            catch (Exception ex)\n            {\n                Logger.LogWarning(\"ISF_DLC4_CATALOG unavailable: \" + ex.GetType().Name);\n            }\n        }\n\n",
+        "Historical": ""
+      },
+      {
+        "Current": "            RoR2Application.onLoad -= LogDlcPickupCatalog;\n            _active = false;",
+        "Historical": "            _active = false;"
+      }
+    ]
+  }
+]

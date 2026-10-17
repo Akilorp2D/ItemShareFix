@@ -1,0 +1,35 @@
+[
+  {
+    "Path": "Directory.Build.props",
+    "CurrentSha256": "36F6C2143ACC4A1976D69DEE504A635D9A12A371778D1D39D15ECFEB671A92D8",
+    "HistoricalSha256": "5B529F12BA0FF4C80BFD5A78276A63EA66C3358E6F5E05938BA190E4D8F7F01D",
+    "Seams": [
+      {
+        "Current": "    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>\n    <DeterministicSourcePaths>true</DeterministicSourcePaths>\n    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>\n    <Version>1.2.0</Version>\n    <AssemblyVersion>1.2.0.0</AssemblyVersion>\n    <FileVersion>1.2.0.0</FileVersion>\n    <InformationalVersion>1.2.0</InformationalVersion>\n  </PropertyGroup>\n</Project>\n",
+        "Historical": "    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>\n    <DeterministicSourcePaths>true</DeterministicSourcePaths>\n    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>\n    <Version>1.1.1</Version>\n    <AssemblyVersion>1.1.1.0</AssemblyVersion>\n    <FileVersion>1.1.1.0</FileVersion>\n    <InformationalVersion>1.1.1</InformationalVersion>\n  </PropertyGroup>\n</Project>\n"
+      }
+    ]
+  },
+  {
+    "Path": "manifest.json",
+    "CurrentSha256": "34CED29F74500DAAEFE4AAC850EE54D490A3F73D3204ED950428E8D63B15AD3A",
+    "HistoricalSha256": "B827B7BD4753779495AB393A2F68067F6947E9CC021FDFC1C774F27267B2A9B0",
+    "Seams": [
+      {
+        "Current": "{\n  \"name\": \"ItemShareFix\",\n  \"version_number\": \"1.2.0\",\n  \"website_url\": \"https://github.com/Akilorp2D/ItemShareFix\",\n  \"description\": \"Fixes and improves ItemShare with personal pickup visibility, local markers, Support Drone/death/disconnect handling, temporary-item controls, and customizable marker UI.\",\n  \"dependencies\": [\n",
+        "Historical": "{\n  \"name\": \"ItemShareFix\",\n  \"version_number\": \"1.1.1\",\n  \"website_url\": \"https://github.com/Akilorp2D/ItemShareFix\",\n  \"description\": \"Fixes and improves ItemShare with personal pickup visibility, local markers, Support Drone/death/disconnect handling, temporary-item controls, and customizable marker UI.\",\n  \"dependencies\": [\n"
+      }
+    ]
+  },
+  {
+    "Path": "src/ItemShareFix.Plugin/ItemShareFixPlugin.cs",
+    "CurrentSha256": "31E6FF58711104E791D603CE00962A8990EA6260E65C21218D7671E9DE77F52A",
+    "HistoricalSha256": "E865243EF558F579F10343BABD3CA153FC5314E5662F6FBE1EB58EAF476F9273",
+    "Seams": [
+      {
+        "Current": "    {\n        public const string PluginGuid = \"com.itemsharefix\";\n        public const string PluginName = \"ItemShareFix\";\n        public const string PluginVersion = \"1.2.0\";\n\n        private Harmony? _harmony;\n        private PluginConfig? _config;\n",
+        "Historical": "    {\n        public const string PluginGuid = \"com.itemsharefix\";\n        public const string PluginName = \"ItemShareFix\";\n        public const string PluginVersion = \"1.1.1\";\n\n        private Harmony? _harmony;\n        private PluginConfig? _config;\n"
+      }
+    ]
+  }
+]

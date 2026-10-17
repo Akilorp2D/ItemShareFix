@@ -1,0 +1,1868 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using BepInEx.Logging;
+using ItemShareFix.Core;
+using RoR2;
+using TMPro;
+using UnityEngine;
+
+namespace ItemShareFix
+{
+    internal static class CommandOptionResolutionDiagnostics
+    {
+        private const int MaxSamples = 5;
+        private const float FlushDelaySeconds = 0.75f;
+        private static readonly Sample[] Records = new Sample[MaxSamples];
+        private static ActiveSample _active;
+        private static int _recordCount;
+        private static int _flushedCount;
+        private static int _lastCaptureFrame = -1;
+        private static float _nextFlushAt;
+        private static bool _enabled;
+
+        private struct ActiveSample
+        {
+            public bool Active;
+            public int Ordinal;
+            public int Frame;
+            public float UnscaledTime;
+            public int PickerInstanceId;
+            public long StartedTicks;
+            public int Gc0;
+            public int Gc1;
+            public int Gc2;
+            public long SnapshotTicks;
+            public long SnapshotPreflightTicks;
+            public long OptionEnumerationMemberResolutionTicks;
+            public long PickupIndexSourceResolutionTicks;
+            public long DedupFinalizationTicks;
+            public long MetadataTicks;
+            public long PickupMetadataClassificationTicks;
+            public long UpstreamShareabilityTicks;
+            public long PresentationFinalizationTicks;
+            public int OptionsVisited;
+            public int AvailableOptions;
+            public int ResolvedPickupIndexes;
+            public int ExactNestedAvailable;
+            public int UnresolvedAvailable;
+            public int DuplicatePickupCount;
+            public int UpstreamShareabilityCalls;
+        }
+
+        private struct Sample
+        {
+            public int Ordinal;
+            public int Frame;
+            public float UnscaledTime;
+            public int PickerInstanceId;
+            public long ElapsedTicks;
+            public long SnapshotTicks;
+            public long SnapshotPreflightTicks;
+            public long OptionEnumerationMemberResolutionTicks;
+            public long PickupIndexSourceResolutionTicks;
+            public long DedupFinalizationTicks;
+            public long MetadataTicks;
+            public long PickupMetadataClassificationTicks;
+            public long UpstreamShareabilityTicks;
+            public long PresentationFinalizationTicks;
+            public int OptionsVisited;
+            public int AvailableOptions;
+            public int ResolvedPickupIndexes;
+            public int ExactNestedAvailable;
+            public int UnresolvedAvailable;
+            public int DuplicatePickupCount;
+            public int UpstreamShareabilityCalls;
+            public int Gc0Delta;
+            public int Gc1Delta;
+            public int Gc2Delta;
+        }
+
+        internal static bool CaptureActive => _active.Active;
+
+        internal static void SetEnabled(bool enabled)
+        {
+            _enabled = enabled;
+            if (!enabled) _active = default;
+        }
+
+        internal static void Begin(int pickerInstanceId)
+        {
+            if (!_enabled || _active.Active || _recordCount >= MaxSamples) return;
+            _active = new ActiveSample
+            {
+                Active = true,
+                Ordinal = _recordCount + 1,
+                Frame = Time.frameCount,
+                UnscaledTime = Time.unscaledTime,
+                PickerInstanceId = pickerInstanceId,
+                StartedTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+                Gc0 = GC.CollectionCount(0),
+                Gc1 = GC.CollectionCount(1),
+                Gc2 = GC.CollectionCount(2),
+            };
+        }
+
+        internal static void RecordSnapshot(
+            long totalTicks,
+            long preflightTicks,
+            long optionEnumerationMemberResolutionTicks,
+            long pickupIndexSourceResolutionTicks,
+            long dedupFinalizationTicks,
+            int optionsVisited,
+            int availableOptions,
+            int resolvedPickupIndexes,
+            int exactNestedAvailable,
+            int unresolvedAvailable,
+            int duplicatePickupCount)
+        {
+            if (!_active.Active) return;
+            _active.SnapshotTicks = totalTicks;
+            _active.SnapshotPreflightTicks = preflightTicks;
+            _active.OptionEnumerationMemberResolutionTicks = optionEnumerationMemberResolutionTicks;
+            _active.PickupIndexSourceResolutionTicks = pickupIndexSourceResolutionTicks;
+            _active.DedupFinalizationTicks = dedupFinalizationTicks;
+            _active.OptionsVisited = optionsVisited;
+            _active.AvailableOptions = availableOptions;
+            _active.ResolvedPickupIndexes = resolvedPickupIndexes;
+            _active.ExactNestedAvailable = exactNestedAvailable;
+            _active.UnresolvedAvailable = unresolvedAvailable;
+            _active.DuplicatePickupCount = duplicatePickupCount;
+        }
+
+        internal static void RecordMetadata(
+            long totalTicks,
+            long pickupMetadataClassificationTicks,
+            long upstreamShareabilityTicks,
+            long presentationFinalizationTicks,
+            int upstreamShareabilityCalls)
+        {
+            if (!_active.Active) return;
+            _active.MetadataTicks = totalTicks;
+            _active.PickupMetadataClassificationTicks = pickupMetadataClassificationTicks;
+            _active.UpstreamShareabilityTicks = upstreamShareabilityTicks;
+            _active.PresentationFinalizationTicks = presentationFinalizationTicks;
+            _active.UpstreamShareabilityCalls = upstreamShareabilityCalls;
+        }
+
+        internal static void Complete()
+        {
+            if (!_active.Active) return;
+            var completedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            var active = _active;
+            Records[_recordCount++] = new Sample
+            {
+                Ordinal = active.Ordinal,
+                Frame = active.Frame,
+                UnscaledTime = active.UnscaledTime,
+                PickerInstanceId = active.PickerInstanceId,
+                ElapsedTicks = completedTicks - active.StartedTicks,
+                SnapshotTicks = active.SnapshotTicks,
+                SnapshotPreflightTicks = active.SnapshotPreflightTicks,
+                OptionEnumerationMemberResolutionTicks = active.OptionEnumerationMemberResolutionTicks,
+                PickupIndexSourceResolutionTicks = active.PickupIndexSourceResolutionTicks,
+                DedupFinalizationTicks = active.DedupFinalizationTicks,
+                MetadataTicks = active.MetadataTicks,
+                PickupMetadataClassificationTicks = active.PickupMetadataClassificationTicks,
+                UpstreamShareabilityTicks = active.UpstreamShareabilityTicks,
+                PresentationFinalizationTicks = active.PresentationFinalizationTicks,
+                OptionsVisited = active.OptionsVisited,
+                AvailableOptions = active.AvailableOptions,
+                ResolvedPickupIndexes = active.ResolvedPickupIndexes,
+                ExactNestedAvailable = active.ExactNestedAvailable,
+                UnresolvedAvailable = active.UnresolvedAvailable,
+                DuplicatePickupCount = active.DuplicatePickupCount,
+                UpstreamShareabilityCalls = active.UpstreamShareabilityCalls,
+                Gc0Delta = GC.CollectionCount(0) - active.Gc0,
+                Gc1Delta = GC.CollectionCount(1) - active.Gc1,
+                Gc2Delta = GC.CollectionCount(2) - active.Gc2,
+            };
+            _active = default;
+            _lastCaptureFrame = Time.frameCount;
+            _nextFlushAt = Time.unscaledTime + FlushDelaySeconds;
+        }
+
+        internal static void FlushIfReady(ManualLogSource log)
+        {
+            if (!_enabled || _flushedCount >= _recordCount) return;
+            if (Time.frameCount <= _lastCaptureFrame + 2 || Time.unscaledTime < _nextFlushAt) return;
+
+            for (var i = _flushedCount; i < _recordCount; i++)
+            {
+                var sample = Records[i];
+                log.LogInfo(
+                    "[ItemShareFix] ISF_COMMAND_OPTION_PROFILE"
+                    + " sample=" + (sample.Ordinal == 1 ? "first" : "subsequent")
+                    + " ordinal=" + sample.Ordinal.ToString(CultureInfo.InvariantCulture)
+                    + " frame=" + sample.Frame.ToString(CultureInfo.InvariantCulture)
+                    + " time=" + sample.UnscaledTime.ToString("F6", CultureInfo.InvariantCulture)
+                    + " picker_instance_id=" + sample.PickerInstanceId.ToString(CultureInfo.InvariantCulture)
+                    + " elapsed_us=" + ToMicroseconds(sample.ElapsedTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " snapshot_us=" + ToMicroseconds(sample.SnapshotTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " snapshot_preflight_us=" + ToMicroseconds(sample.SnapshotPreflightTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " option_enumeration_member_resolution_us=" + ToMicroseconds(sample.OptionEnumerationMemberResolutionTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " pickup_index_source_resolution_us=" + ToMicroseconds(sample.PickupIndexSourceResolutionTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " dedup_finalization_us=" + ToMicroseconds(sample.DedupFinalizationTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " metadata_us=" + ToMicroseconds(sample.MetadataTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " pickup_metadata_catalog_classification_us=" + ToMicroseconds(sample.PickupMetadataClassificationTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " upstream_shareability_bridge_us=" + ToMicroseconds(sample.UpstreamShareabilityTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " presentation_finalization_us=" + ToMicroseconds(sample.PresentationFinalizationTicks).ToString("F3", CultureInfo.InvariantCulture)
+                    + " options_visited=" + sample.OptionsVisited.ToString(CultureInfo.InvariantCulture)
+                    + " available_options=" + sample.AvailableOptions.ToString(CultureInfo.InvariantCulture)
+                    + " resolved_pickup_indexes=" + sample.ResolvedPickupIndexes.ToString(CultureInfo.InvariantCulture)
+                    + " exact_nested_available=" + sample.ExactNestedAvailable.ToString(CultureInfo.InvariantCulture)
+                    + " unresolved_available=" + sample.UnresolvedAvailable.ToString(CultureInfo.InvariantCulture)
+                    + " duplicate_pickups=" + sample.DuplicatePickupCount.ToString(CultureInfo.InvariantCulture)
+                    + " upstream_shareability_calls=" + sample.UpstreamShareabilityCalls.ToString(CultureInfo.InvariantCulture)
+                    + " gc0_delta=" + sample.Gc0Delta.ToString(CultureInfo.InvariantCulture)
+                    + " gc1_delta=" + sample.Gc1Delta.ToString(CultureInfo.InvariantCulture)
+                    + " gc2_delta=" + sample.Gc2Delta.ToString(CultureInfo.InvariantCulture));
+            }
+            _flushedCount = _recordCount;
+        }
+
+        private static double ToMicroseconds(long ticks)
+            => ticks * 1000000.0 / System.Diagnostics.Stopwatch.Frequency;
+    }
+
+    internal sealed class LocalPickupPresentationGate : MonoBehaviour
+    {
+        private readonly Dictionary<Renderer, bool> _renderers = new Dictionary<Renderer, bool>();
+        private readonly Dictionary<Light, bool> _lights = new Dictionary<Light, bool>();
+        private readonly Dictionary<Behaviour, bool> _visualBehaviours = new Dictionary<Behaviour, bool>();
+        private bool _hidden;
+
+        public void ApplyHidden()
+        {
+            _hidden = true;
+            RefreshAndApply();
+        }
+
+        public void Restore()
+        {
+            _hidden = false;
+            foreach (var pair in _renderers.ToArray()) if (pair.Key != null) pair.Key.forceRenderingOff = pair.Value;
+            foreach (var pair in _lights.ToArray()) if (pair.Key != null) pair.Key.enabled = pair.Value;
+            foreach (var pair in _visualBehaviours.ToArray()) if (pair.Key != null) pair.Key.enabled = pair.Value;
+            _renderers.Clear();
+            _lights.Clear();
+            _visualBehaviours.Clear();
+        }
+
+        public void RefreshAndApply()
+        {
+            if (!_hidden) return;
+            foreach (var renderer in GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer == null) continue;
+                if (!_renderers.ContainsKey(renderer)) _renderers[renderer] = renderer.forceRenderingOff;
+                renderer.forceRenderingOff = true;
+            }
+            foreach (var light in GetComponentsInChildren<Light>(true))
+            {
+                if (light == null) continue;
+                if (!_lights.ContainsKey(light)) _lights[light] = light.enabled;
+                light.enabled = false;
+            }
+            foreach (var behaviour in GetComponentsInChildren<Behaviour>(true))
+            {
+                if (behaviour == null || behaviour is Light) continue;
+                var typeName = behaviour.GetType().FullName ?? behaviour.GetType().Name;
+                if (!IsPresentationOnlyBehaviour(typeName)) continue;
+                if (!_visualBehaviours.ContainsKey(behaviour)) _visualBehaviours[behaviour] = behaviour.enabled;
+                behaviour.enabled = false;
+            }
+            PruneDestroyed();
+        }
+
+        private static bool IsPresentationOnlyBehaviour(string typeName)
+            => typeName.IndexOf("Highlight", StringComparison.OrdinalIgnoreCase) >= 0
+               || typeName.IndexOf("VisualEffect", StringComparison.OrdinalIgnoreCase) >= 0
+               || typeName.IndexOf("PickupDisplayGlow", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        private void PruneDestroyed()
+        {
+            foreach (var key in _renderers.Keys.Where(x => x == null).ToArray()) _renderers.Remove(key);
+            foreach (var key in _lights.Keys.Where(x => x == null).ToArray()) _lights.Remove(key);
+            foreach (var key in _visualBehaviours.Keys.Where(x => x == null).ToArray()) _visualBehaviours.Remove(key);
+        }
+
+        private void OnDestroy()
+        {
+            if (_hidden) Restore();
+        }
+    }
+
+    internal sealed class LocalCommandPresentationGate : MonoBehaviour
+    {
+        private readonly Dictionary<Renderer, bool> _renderers = new Dictionary<Renderer, bool>();
+        private readonly Dictionary<Light, bool> _lights = new Dictionary<Light, bool>();
+        private readonly Dictionary<Behaviour, bool> _visualBehaviours = new Dictionary<Behaviour, bool>();
+        private bool _hidden;
+
+        public bool IsHidden => _hidden;
+
+        public void ApplyHidden()
+        {
+            _hidden = true;
+            RefreshAndApply();
+        }
+
+        public void Restore()
+        {
+            _hidden = false;
+            foreach (var pair in _renderers.ToArray()) if (pair.Key != null) pair.Key.forceRenderingOff = pair.Value;
+            foreach (var pair in _lights.ToArray()) if (pair.Key != null) pair.Key.enabled = pair.Value;
+            foreach (var pair in _visualBehaviours.ToArray()) if (pair.Key != null) pair.Key.enabled = pair.Value;
+            _renderers.Clear();
+            _lights.Clear();
+            _visualBehaviours.Clear();
+        }
+
+        public void RefreshAndApply()
+        {
+            if (!_hidden) return;
+            foreach (var renderer in GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer == null) continue;
+                if (!_renderers.ContainsKey(renderer)) _renderers[renderer] = renderer.forceRenderingOff;
+                renderer.forceRenderingOff = true;
+            }
+            foreach (var light in GetComponentsInChildren<Light>(true))
+            {
+                if (light == null) continue;
+                if (!_lights.ContainsKey(light)) _lights[light] = light.enabled;
+                light.enabled = false;
+            }
+            foreach (var behaviour in GetComponentsInChildren<Behaviour>(true))
+            {
+                if (behaviour == null || behaviour is Light || behaviour is PickupPickerController || behaviour is UnityEngine.Networking.NetworkBehaviour) continue;
+                var typeName = behaviour.GetType().FullName ?? behaviour.GetType().Name;
+                if (!IsPresentationOnlyBehaviour(typeName)) continue;
+                if (!_visualBehaviours.ContainsKey(behaviour)) _visualBehaviours[behaviour] = behaviour.enabled;
+                behaviour.enabled = false;
+            }
+            PruneDestroyed();
+        }
+
+        private static bool IsPresentationOnlyBehaviour(string typeName)
+            => typeName.IndexOf("Highlight", StringComparison.OrdinalIgnoreCase) >= 0
+               || typeName.IndexOf("VisualEffect", StringComparison.OrdinalIgnoreCase) >= 0
+               || typeName.IndexOf("PickupDisplayGlow", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        private void PruneDestroyed()
+        {
+            foreach (var key in _renderers.Keys.Where(x => x == null).ToArray()) _renderers.Remove(key);
+            foreach (var key in _lights.Keys.Where(x => x == null).ToArray()) _lights.Remove(key);
+            foreach (var key in _visualBehaviours.Keys.Where(x => x == null).ToArray()) _visualBehaviours.Remove(key);
+        }
+
+        private void OnDestroy()
+        {
+            if (_hidden) Restore();
+        }
+    }
+
+    // Kept shape-compatible with external observers: _markers remains enumerable and Pickup stays GenericPickupController.
+    internal sealed class PersonalPickupMarker
+    {
+        public int InstanceId { get; set; }
+        public GenericPickupController Pickup { get; set; } = null!;
+        public string Label { get; set; } = string.Empty;
+        public string ItemSemanticKey { get; set; } = string.Empty;
+        public string ClassName { get; set; } = "UNKNOWN";
+        public MarkerClassKind Kind { get; set; } = MarkerClassKind.Unknown;
+        public Color TextColor { get; set; } = Color.white;
+        public MarkerLifetimeKind Lifetime { get; set; } = MarkerLifetimeKind.Permanent;
+    }
+
+    internal sealed class PersonalCommandMarker
+    {
+        public int InstanceId { get; set; }
+        public PickupPickerController Picker { get; set; } = null!;
+        public string Label { get; set; } = string.Empty;
+        public string ItemSemanticKey { get; set; } = string.Empty;
+        public string ClassName { get; set; } = "UNKNOWN";
+        public MarkerClassKind Kind { get; set; } = MarkerClassKind.Unknown;
+        public Color TextColor { get; set; } = Color.white;
+        public MarkerLifetimeKind Lifetime { get; set; } = MarkerLifetimeKind.Unknown;
+    }
+
+    internal readonly struct MarkerRuntimeMetadata
+    {
+        public MarkerRuntimeMetadata(MarkerClassKind kind, string className, string label, Color textColor, bool exactClass)
+        {
+            Kind = kind;
+            ClassName = className;
+            Label = label;
+            TextColor = textColor;
+            ExactClass = exactClass;
+        }
+
+        public MarkerClassKind Kind { get; }
+        public string ClassName { get; }
+        public string Label { get; }
+        public Color TextColor { get; }
+        public bool ExactClass { get; }
+    }
+
+    internal sealed class ClientPresentationCoordinator
+    {
+        private readonly PluginConfig _config;
+        private readonly UpstreamBridge _upstream;
+        private readonly ManualLogSource _log;
+        private readonly Dictionary<int, LocalPickupPresentationGate> _gates = new Dictionary<int, LocalPickupPresentationGate>();
+        private readonly Dictionary<int, LocalCommandPresentationGate> _commandGates = new Dictionary<int, LocalCommandPresentationGate>();
+        private readonly Dictionary<int, bool> _localCommandGateDiagnosticState = new Dictionary<int, bool>();
+        private readonly Dictionary<int, string> _localPickupVisualDiagnosticState = new Dictionary<int, string>();
+        private readonly Dictionary<long, bool> _localPickupInteractionDiagnosticState = new Dictionary<long, bool>();
+        private readonly HashSet<int> _upstreamVisibilityGateObserved = new HashSet<int>();
+        private readonly List<PersonalPickupMarker> _markers = new List<PersonalPickupMarker>();
+        private readonly List<PersonalCommandMarker> _commandMarkers = new List<PersonalCommandMarker>();
+        private readonly List<PersonalPickupMarker> _nextOrdinaryMarkers = new List<PersonalPickupMarker>(MarkerPresentationPolicy.MaxOrdinaryMarkers);
+        private readonly List<PersonalCommandMarker> _nextCommandMarkers = new List<PersonalCommandMarker>(MarkerPresentationPolicy.MaxCommandMarkers);
+        private readonly HashSet<int> _seenPickups = new HashSet<int>();
+        private readonly HashSet<int> _previousOrdinaryIds = new HashSet<int>();
+        private readonly HashSet<int> _seenCommandCandidateIds = new HashSet<int>();
+        private readonly HashSet<int> _previousCommandIds = new HashSet<int>();
+        private readonly List<int> _staleInstanceIds = new List<int>();
+        private readonly List<CharacterMaster> _localMasterBuffer = new List<CharacterMaster>(4);
+        private ParticipantState[] _localStateBuffer = Array.Empty<ParticipantState>();
+        private bool[] _collectedBuffer = Array.Empty<bool>();
+        private bool?[] _localPickedStateBuffer = Array.Empty<bool?>();
+        private readonly PersonalMarkerRegistry _markerRegistry = new PersonalMarkerRegistry(MarkerPresentationPolicy.MaxLogicalMarkers);
+        private readonly HashSet<int> _ordinaryRenderLogged = new HashSet<int>();
+        private readonly Dictionary<int, string> _commandRemovalReasons = new Dictionary<int, string>();
+        private readonly HashSet<int> _commandOptionDisagreementLogged = new HashSet<int>();
+        private readonly HashSet<int> _commandLifetimeUnknownLogged = new HashSet<int>();
+        private readonly Dictionary<int, string> _commandShareabilityDiagnosticState = new Dictionary<int, string>();
+        private float _nextSweep;
+        private int _lastStageToken = int.MinValue;
+        private int _localMastersFrame = -1;
+        private CharacterMaster[] _cachedLocalMasters = Array.Empty<CharacterMaster>();
+        private bool _refreshRequested;
+        private int _upstreamNormalizationDepth;
+        private readonly MarkerRuntimePerformanceCounters _performance = new MarkerRuntimePerformanceCounters();
+        private readonly NativeHudMarkerRenderer _hudRenderer;
+        private readonly Dictionary<long, MarkerHudDiagnosticState> _markerProjectionDiagnosticState = new Dictionary<long, MarkerHudDiagnosticState>();
+        private readonly LocalHudPresentationProbe _localHudProbe;
+        private readonly List<MarkerHudExclusionZone> _dynamicHudZones = new List<MarkerHudExclusionZone>(1);
+        private readonly List<MarkerRenderInput> _renderInputs = new List<MarkerRenderInput>(MarkerPresentationPolicy.MaxLogicalMarkers);
+        private bool? _modalHudSuppressionDiagnosticState;
+        private string _modalHudSuppressionReason = string.Empty;
+        private bool? _messageHudDiagnosticState;
+        private bool _hasMessageHudDiagnosticRect;
+        private MarkerHudRect _messageHudDiagnosticRect;
+        private Camera? _presentationCamera;
+        private float _nextPresentationCameraRefresh;
+        private float _nextPerformanceSummary;
+        private int _lastPerformanceMarkerCount;
+        private C2HitchToken _firstMarkerActivationTiming;
+
+        public ClientPresentationCoordinator(PluginConfig config, UpstreamBridge upstream, ManualLogSource log)
+        {
+            _config = config;
+            _upstream = upstream;
+            _log = log;
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticLogging.Value);
+            CommandOptionResolutionDiagnostics.SetEnabled(_config.DiagnosticLogging.Value);
+            _localHudProbe = new LocalHudPresentationProbe(_performance);
+            _localHudProbe.PrimeGlobalDiscoveryDuringInitialization();
+            _hudRenderer = new NativeHudMarkerRenderer(log, _performance);
+            _hudRenderer.PrimeNativeTypographyDuringInitialization();
+            _hudRenderer.PrimeNestedColdPathDuringInitialization();
+            _config.MarkerPresentationSettingChanged += OnMarkerPresentationSettingChanged;
+            _log.LogInfo("ISF_MARKER_WORLD_CLUSTER_CONFIG merge=4.50 split=6.00 dwell=0.35 solve=0.20");
+        }
+
+        private void OnMarkerPresentationSettingChanged(object? sender, EventArgs args)
+        {
+            _hudRenderer.InvalidatePresentationSettings(_config.MarkerSettingsSnapshot(), _config.MarkerVisualSettingsSnapshot());
+            if (ReferenceEquals(sender, _config.PersonalMarkersEnabled))
+            {
+                if (!_config.PersonalMarkersEnabled.Value) _hudRenderer.Clear();
+                RequestRefresh();
+            }
+            else if (ReferenceEquals(sender, _config.ShareTemporaryItems))
+            {
+                RequestRefresh();
+            }
+        }
+
+        public void RecordUnityUpdate() => _performance.RecordUnityUpdate();
+
+        public void RequestRefresh() => _refreshRequested = true;
+
+        public void OnBlockingModalLifecycleObserved(Component component)
+        {
+            // Presentation-only invalidation. No marker registry/state mutation and no full layout solve is requested here.
+            _localHudProbe.ObserveBlockingModalLifecycle(component);
+        }
+
+        public void OnHudLifecycleObserved(Component component)
+        {
+            // Exact HUD lifecycle observation repopulates bounded presentation caches without scene-wide discovery.
+            _localHudProbe.ObserveHudLifecycle(component);
+        }
+
+        public void OnTmpSubMeshOnDisable(TMP_SubMeshUI subMesh)
+            => _hudRenderer.ObserveTmpSubMeshOnDisable(subMesh);
+
+        public bool TryEvaluateLocalCollected(GenericPickupController pickup, out bool collectedByAllLocalParticipants)
+        {
+            collectedByAllLocalParticipants = false;
+            if (!_config.Enabled.Value
+                || !_config.PersonalPickupVisibilityRepairEnabled.Value
+                || !_upstream.IsIndividualMode
+                || !_upstream.HideCollectedOrbsEnabled
+                || pickup == null
+                || KnownProgressionPickupCompatibility.IsExcluded(pickup)
+                || !_upstream.IsShareable(pickup)) return false;
+
+            var localMasters = GetLocalMastersSnapshot();
+            if (localMasters.Length == 0) return false;
+            collectedByAllLocalParticipants = localMasters.All(master => _upstream.HasCollected(pickup, master));
+            return true;
+        }
+
+        public bool ShouldSuppressLocalPickupInteraction(GenericPickupController pickup, Interactor interactor)
+        {
+            if (!_config.Enabled.Value
+                || !_config.PersonalPickupVisibilityRepairEnabled.Value
+                || !_upstream.IsIndividualMode
+                || !_upstream.HideCollectedOrbsEnabled
+                || pickup == null
+                || interactor == null
+                || KnownProgressionPickupCompatibility.IsExcluded(pickup)) return false;
+
+            var shareable = _upstream.IsShareable(pickup);
+            var body = interactor.GetComponent<CharacterBody>();
+            if (body == null || body.master == null) return false;
+            var master = body.master;
+            var interactorIsLocal = master.hasAuthority;
+            var collected = interactorIsLocal && _upstream.HasCollected(pickup, master);
+            var suppress = LocalPickupSuppressionPolicy.ShouldSuppressInteractor(
+                featureEnabled: true,
+                upstreamHideCollectedEnabled: true,
+                shareablePickup: shareable,
+                interactorIsLocal: interactorIsLocal,
+                interactorHasCollected: collected);
+
+            if (interactorIsLocal) LogLocalInteractionGateTransition(pickup, master, collected, suppress);
+            return suppress;
+        }
+
+        public void OnUpstreamVisibilityApplied(GenericPickupController pickup)
+        {
+            if (pickup == null || _upstreamNormalizationDepth > 0) return;
+            var instanceId = pickup.GetInstanceID();
+            if (!TryEvaluateLocalCollected(pickup, out var collectedByAllLocalParticipants))
+            {
+                ReleaseGate(instanceId);
+                RequestRefresh();
+                return;
+            }
+
+            if (!collectedByAllLocalParticipants)
+            {
+                ReleaseGate(instanceId);
+                return;
+            }
+
+            // ItemShare may have just partially hidden the historical pickupDisplay subtree.
+            // Normalize that exact subtree inside the same call stack, then apply our full-root gate.
+            // The depth guard prevents our normalization call from recursively re-entering this postfix.
+            NormalizeUpstreamForGate(pickup);
+            if (!_gates.TryGetValue(instanceId, out var gate) || gate == null)
+            {
+                gate = pickup.gameObject.GetComponent<LocalPickupPresentationGate>() ?? pickup.gameObject.AddComponent<LocalPickupPresentationGate>();
+                _gates[instanceId] = gate;
+            }
+            gate.ApplyHidden();
+            if (_config.DiagnosticLogging.Value && _upstreamVisibilityGateObserved.Add(instanceId))
+            {
+                LogInfo("ISF_C20_LOCAL_PICKUP_GATE pickup=" + instanceId.ToString(CultureInfo.InvariantCulture)
+                    + " localMaster=process localCollected=all visualSuppressed=true interactionSuppressed=participant-specific"
+                    + " action=upstream-visibility-applied reason=all-local-collected");
+            }
+        }
+
+        public void Tick()
+        {
+            var stageToken = CurrentStageToken();
+            if (stageToken != _lastStageToken)
+            {
+                RestoreAll("stage-or-run-boundary");
+                _localHudProbe.InvalidateLifecycle();
+                _presentationCamera = null;
+                _nextPresentationCameraRefresh = 0f;
+                _lastStageToken = stageToken;
+                _refreshRequested = true;
+            }
+
+            if (!_refreshRequested && Time.unscaledTime < _nextSweep) return;
+            _refreshRequested = false;
+            _nextSweep = Time.unscaledTime + Math.Max(0.08f, _config.PresentationSweepSeconds.Value);
+            Sweep();
+        }
+
+        public void RenderFrame()
+        {
+            _performance.RecordRenderFrame();
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticLogging.Value);
+            CommandOptionResolutionDiagnostics.SetEnabled(_config.DiagnosticLogging.Value);
+            C2HitchDiagnostics.FlushIfReady(_log);
+            CommandOptionResolutionDiagnostics.FlushIfReady(_log);
+            var markerFeatureActive = _config.Enabled.Value
+                && _config.PersonalMarkersEnabled.Value
+                && (_markers.Count > 0 || _commandMarkers.Count > 0);
+            if (!markerFeatureActive)
+            {
+                if (_lastPerformanceMarkerCount > 0) EmitPerformanceSummary("marker-teardown", 0, force: true);
+                _lastPerformanceMarkerCount = 0;
+                _hudRenderer.SetPresentationSuppressed(false);
+                _hudRenderer.Clear();
+                if (_config.Enabled.Value && _config.PersonalMarkersEnabled.Value) AdvanceMarkerColdPathWarmup(allowRefresh: true);
+                return;
+            }
+
+            if (!AdvanceMarkerColdPathWarmup(allowRefresh: false)) return;
+
+            var markerCount = _markers.Count + _commandMarkers.Count;
+            C2HitchDiagnostics.MarkFirstMarkerFrame();
+            var c2RenderTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ClientRenderFrameMarkerBearing, markerCount: markerCount);
+            try
+            {
+            _lastPerformanceMarkerCount = markerCount;
+            MaybeEmitPerformanceSummary(markerCount);
+
+            var c2HudProbeTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ClientHudProbe, markerCount: markerCount);
+            bool modalActive;
+            string modalReason;
+            bool messageHudActive;
+            MarkerHudRect messageHudRect;
+            try
+            {
+            modalActive = _localHudProbe.TryGetBlockingModalCached(out modalReason);
+            if (!_modalHudSuppressionDiagnosticState.HasValue
+                || _modalHudSuppressionDiagnosticState.Value != modalActive
+                || (modalActive && !string.Equals(_modalHudSuppressionReason, modalReason, StringComparison.Ordinal)))
+            {
+                _modalHudSuppressionDiagnosticState = modalActive;
+                _modalHudSuppressionReason = modalReason;
+                LogInfo("ISF_MARKER_HUD_SUPPRESS reason=" + (modalActive ? modalReason : "pause-menu") + " active=" + modalActive);
+            }
+
+            _hudRenderer.SetPresentationSuppressed(modalActive);
+            if (!MarkerPresentationPolicy.ShouldRenderHudMarkers(markerFeatureActive, modalActive)) return;
+
+            _dynamicHudZones.Clear();
+            messageHudActive = _localHudProbe.TryGetVisibleMessageHudRectCached(out messageHudRect);
+            if (messageHudActive)
+            {
+                _dynamicHudZones.Add(new MarkerHudExclusionZone(
+                    "message-hud-runtime",
+                    messageHudRect.Left, messageHudRect.Right, messageHudRect.Bottom, messageHudRect.Top));
+            }
+            var messageRectChanged = messageHudActive
+                && (!_hasMessageHudDiagnosticRect || !SameDiagnosticRect(_messageHudDiagnosticRect, messageHudRect));
+            if (!_messageHudDiagnosticState.HasValue
+                || _messageHudDiagnosticState.Value != messageHudActive
+                || messageRectChanged)
+            {
+                _messageHudDiagnosticState = messageHudActive;
+                _hasMessageHudDiagnosticRect = messageHudActive;
+                _messageHudDiagnosticRect = messageHudRect;
+                LogInfo("ISF_MARKER_MESSAGE_HUD active=" + messageHudActive
+                    + (messageHudActive ? " rect=" + FormatMarkerRect(messageHudRect) : string.Empty));
+            }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2HudProbeTiming, markerCount: markerCount);
+            }
+
+            Camera? camera = null;
+            var markerLanguage = MarkerLanguage.English;
+            var c2CandidateTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ClientCandidateBuild, markerCount: markerCount);
+            try
+            {
+            camera = GetPresentationCamera();
+            if (camera == null || !TryGetFiniteCameraPosition(camera, out var cameraPosition))
+            {
+                _hudRenderer.Clear();
+                return;
+            }
+
+            markerLanguage = CurrentMarkerLanguage();
+            _renderInputs.Clear();
+            for (var i = 0; i < _markers.Count;)
+            {
+                var marker = _markers[i];
+                if (!TryResolveOrdinaryMarkerTarget(marker.Pickup, out var basePosition, out var invalidReason))
+                {
+                    RemoveOrdinaryMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                if (!TryResolvePresentationDistance(cameraPosition, basePosition, out var distance, out invalidReason))
+                {
+                    RemoveOrdinaryMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                _renderInputs.Add(new MarkerRenderInput(
+                    new PersonalMarkerIdentity(PersonalMarkerKind.OrdinaryPickup, marker.InstanceId),
+                    basePosition + Vector3.up * 1.2f,
+                    distance, PickupLabel(marker.Pickup, markerLanguage), marker.ItemSemanticKey, marker.ClassName, marker.Kind, marker.TextColor, ResolvePickupIcon(marker.Pickup), marker.Lifetime));
+                i++;
+            }
+
+            var c2CommandInputTiming = C2HitchDiagnostics.Begin(
+                C2HitchPhase.CommandRenderInputConstruction,
+                markerCount: _commandMarkers.Count);
+            try
+            {
+            for (var i = 0; i < _commandMarkers.Count;)
+            {
+                var marker = _commandMarkers[i];
+                if (!TryResolveCommandMarkerTarget(marker.Picker, out var basePosition, out var invalidReason))
+                {
+                    RemoveCommandMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                if (!TryResolvePresentationDistance(cameraPosition, basePosition, out var distance, out invalidReason))
+                {
+                    RemoveCommandMarkerNow(marker, invalidReason);
+                    continue;
+                }
+                _renderInputs.Add(new MarkerRenderInput(
+                    new PersonalMarkerIdentity(PersonalMarkerKind.CommandPicker, marker.InstanceId),
+                    basePosition + Vector3.up * 1.35f,
+                    distance, MarkerClassPolicy.LocalizedReadableClassLabel(marker.Kind, markerLanguage), marker.ItemSemanticKey, marker.ClassName, marker.Kind, marker.TextColor, nativeIcon: null, lifetime: marker.Lifetime));
+                i++;
+            }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2CommandInputTiming, markerCount: _renderInputs.Count);
+            }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2CandidateTiming, markerCount: _renderInputs.Count);
+            }
+
+            if (camera == null) return;
+            var c2RendererTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ClientRendererCall, markerCount: _renderInputs.Count);
+            try
+            {
+            _hudRenderer.Render(
+                camera,
+                _renderInputs,
+                _config.MarkerSettingsSnapshot(),
+                _config.MarkerVisualSettingsSnapshot(),
+                markerLanguage,
+                OnMarkerRendered,
+                _dynamicHudZones);
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2RendererTiming, markerCount: _renderInputs.Count);
+                if (_firstMarkerActivationTiming.Active)
+                {
+                    C2HitchDiagnostics.End(
+                        _firstMarkerActivationTiming,
+                        markerCount: _markers.Count + _commandMarkers.Count);
+                    _firstMarkerActivationTiming = default;
+                }
+            }
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(c2RenderTiming, markerCount: _markers.Count + _commandMarkers.Count);
+            }
+        }
+
+        private bool AdvanceMarkerColdPathWarmup(bool allowRefresh)
+        {
+            if (Run.instance == null || GetPresentationCamera() == null) return false;
+
+            var hudProbeTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ColdWarmupHudProbe, markerCount: _markers.Count + _commandMarkers.Count);
+            bool hudReady;
+            try
+            {
+                hudReady = _localHudProbe.WarmColdPathStep(allowRefresh);
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(hudProbeTiming, markerCount: _markers.Count + _commandMarkers.Count);
+            }
+            if (!hudReady) return false;
+
+            var nativeTiming = C2HitchDiagnostics.Begin(C2HitchPhase.ColdWarmupNative, markerCount: _markers.Count + _commandMarkers.Count);
+            try
+            {
+                return _hudRenderer.WarmColdPathStep();
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(nativeTiming, markerCount: _markers.Count + _commandMarkers.Count);
+            }
+        }
+
+        public void Dispose()
+        {
+            _config.MarkerPresentationSettingChanged -= OnMarkerPresentationSettingChanged;
+            RestoreAll("external-or-plugin-teardown");
+            _hudRenderer.Dispose();
+        }
+
+        public void RestoreAll() => RestoreAll("external-or-plugin-teardown");
+
+        private void RestoreAll(string reason)
+        {
+            if (_markers.Count > 0 || _commandMarkers.Count > 0) EmitPerformanceSummary(reason, 0, force: true);
+            _lastPerformanceMarkerCount = 0;
+            foreach (var gate in _gates.Values.ToArray())
+            {
+                if (gate == null) continue;
+                gate.Restore();
+                UnityEngine.Object.Destroy(gate);
+            }
+            _gates.Clear();
+            foreach (var gate in _commandGates.Values.ToArray())
+            {
+                if (gate == null) continue;
+                gate.Restore();
+                UnityEngine.Object.Destroy(gate);
+            }
+            _commandGates.Clear();
+            _localCommandGateDiagnosticState.Clear();
+            _localPickupVisualDiagnosticState.Clear();
+            _localPickupInteractionDiagnosticState.Clear();
+            _upstreamVisibilityGateObserved.Clear();
+
+            foreach (var marker in _commandMarkers.ToArray())
+            {
+                LogCommandCleanup(marker.InstanceId, reason);
+            }
+            _markers.Clear();
+            _commandMarkers.Clear();
+            _markerRegistry.Clear();
+            _ordinaryRenderLogged.Clear();
+            _commandRemovalReasons.Clear();
+            _commandOptionDisagreementLogged.Clear();
+            _commandShareabilityDiagnosticState.Clear();
+            _markerProjectionDiagnosticState.Clear();
+            _modalHudSuppressionDiagnosticState = null;
+            _modalHudSuppressionReason = string.Empty;
+            _messageHudDiagnosticState = null;
+            _hasMessageHudDiagnosticRect = false;
+            _messageHudDiagnosticRect = default;
+            _localHudProbe.InvalidateLifecycle();
+            _presentationCamera = null;
+            _nextPresentationCameraRefresh = 0f;
+            _hudRenderer.SetPresentationSuppressed(false);
+            _hudRenderer.Clear();
+        }
+
+        private void Sweep()
+        {
+            if (!_config.Enabled.Value || !_upstream.IsIndividualMode)
+            {
+                RestoreAll("feature-disabled-or-non-individual-mode");
+                return;
+            }
+
+            var localMasters = GetLocalMastersSnapshot();
+            if (localMasters.Length == 0)
+            {
+                RestoreAll("no-local-master");
+                return;
+            }
+            C2HitchDiagnostics.SetEnabled(_config.DiagnosticLogging.Value);
+            CommandOptionResolutionDiagnostics.SetEnabled(_config.DiagnosticLogging.Value);
+            var pickupControllers = InstanceTracker.GetInstancesList<GenericPickupController>();
+            var c2SweepTiming = C2HitchDiagnostics.Begin(
+                C2HitchPhase.ClientSweep,
+                markerCount: _markers.Count + _commandMarkers.Count,
+                pickupCount: pickupControllers.Count);
+            var c2PickupSweepTiming = pickupControllers.Count > 0
+                ? C2HitchDiagnostics.Begin(
+                    C2HitchPhase.ClientSweepPickupPresent,
+                    markerCount: _markers.Count + _commandMarkers.Count,
+                    pickupCount: pickupControllers.Count)
+                : default;
+            try
+            {
+            EnsureParticipantBuffers(localMasters.Length);
+            var localStates = _localStateBuffer;
+            for (var i = 0; i < localMasters.Length; i++)
+                localStates[i] = LocalParticipantResolver.ClassifyLocal(localMasters[i]);
+            var markerLanguage = CurrentMarkerLanguage();
+            var sweepCamera = GetPresentationCamera();
+            var sweepCameraPosition = default(Vector3);
+            var hasSweepCameraPosition = sweepCamera != null && TryGetFiniteCameraPosition(sweepCamera, out sweepCameraPosition);
+
+            _markerRegistry.BeginSweep();
+            _nextOrdinaryMarkers.Clear();
+            _seenPickups.Clear();
+            _previousOrdinaryIds.Clear();
+            for (var i = 0; i < _markers.Count; i++) _previousOrdinaryIds.Add(_markers[i].InstanceId);
+            var ordinaryCount = 0;
+            foreach (var pickup in pickupControllers)
+            {
+                if (pickup == null) continue;
+                var instanceId = pickup.GetInstanceID();
+                if (KnownProgressionPickupCompatibility.IsExcluded(pickup))
+                {
+                    ReleaseGate(instanceId);
+                    _markerRegistry.Remove(PersonalMarkerKind.OrdinaryPickup, instanceId);
+                    _ordinaryRenderLogged.Remove(instanceId);
+                    continue;
+                }
+                if (!TryResolveOrdinaryMarkerTarget(pickup, out var worldPosition, out var invalidReason)
+                    || (hasSweepCameraPosition && !TryResolvePresentationDistance(sweepCameraPosition, worldPosition, out _, out invalidReason)))
+                {
+                    ReleaseGate(instanceId);
+                    _markerRegistry.Remove(PersonalMarkerKind.OrdinaryPickup, instanceId);
+                    _ordinaryRenderLogged.Remove(instanceId);
+                    if (_previousOrdinaryIds.Contains(instanceId)) LogOrdinaryCleanup(instanceId, invalidReason);
+                    continue;
+                }
+                if (!_upstream.IsShareable(pickup)) continue;
+                _seenPickups.Add(instanceId);
+
+                var collected = _collectedBuffer;
+                var collectedLocalCount = 0;
+                for (var i = 0; i < localMasters.Length; i++)
+                {
+                    var hasCollected = _upstream.HasCollected(pickup, localMasters[i]);
+                    collected[i] = hasCollected;
+                    if (hasCollected) collectedLocalCount++;
+                }
+                var hide = LocalPickupSuppressionPolicy.ShouldSuppressProcessVisual(
+                    _config.PersonalPickupVisibilityRepairEnabled.Value,
+                    _upstream.HideCollectedOrbsEnabled,
+                    collected.Length,
+                    collectedLocalCount);
+
+                if (hide)
+                {
+                    if (!_gates.TryGetValue(instanceId, out var gate) || gate == null)
+                    {
+                        // Reset the exact upstream subtree first so our captured restore state is not poisoned by its old partial hide.
+                        NormalizeUpstreamForGate(pickup);
+                        gate = pickup.gameObject.GetComponent<LocalPickupPresentationGate>() ?? pickup.gameObject.AddComponent<LocalPickupPresentationGate>();
+                        _gates[instanceId] = gate;
+                    }
+                    gate.ApplyHidden();
+                }
+                else
+                {
+                    ReleaseGate(instanceId);
+                }
+                LogLocalVisualGateTransition(pickup, collectedLocalCount, collected.Length, hide);
+
+                var lifetime = MarkerLifetimePolicy.FromTemporaryFlag(pickup.pickup.isTempItem);
+                if (_config.PersonalMarkersEnabled.Value
+                    && MarkerLifetimePolicy.IsMarkerEligible(lifetime, _config.ShareTemporaryItems.Value)
+                    && ordinaryCount < MarkerPresentationPolicy.MaxOrdinaryMarkers
+                    && ShouldShowMarker(localStates, collected))
+                {
+                    var label = MarkerPresentationPolicy.NormalizeLabel(PickupLabel(pickup, markerLanguage), MarkerTextLocalization.FallbackSharedPickup(markerLanguage));
+                    var metadata = ResolvePickupMarkerMetadata(pickup.pickup.pickupIndex);
+                    var transition = _markerRegistry.MarkPending(PersonalMarkerKind.OrdinaryPickup, instanceId, label);
+                    if (transition != PersonalMarkerTransition.CapacityRejected)
+                    {
+                        _nextOrdinaryMarkers.Add(new PersonalPickupMarker
+                        {
+                            InstanceId = instanceId,
+                            Pickup = pickup,
+                            Label = label,
+                            ItemSemanticKey = PickupSemanticKey(pickup),
+                            ClassName = metadata.ClassName,
+                            Kind = metadata.Kind,
+                            TextColor = metadata.TextColor,
+                            Lifetime = lifetime,
+                        });
+                        ordinaryCount++;
+                    }
+                }
+            }
+
+            _staleInstanceIds.Clear();
+            foreach (var key in _gates.Keys)
+                if (!_seenPickups.Contains(key)) _staleInstanceIds.Add(key);
+            for (var i = 0; i < _staleInstanceIds.Count; i++) ReleaseGate(_staleInstanceIds[i]);
+
+            _nextCommandMarkers.Clear();
+            _seenCommandCandidateIds.Clear();
+            _commandRemovalReasons.Clear();
+            _previousCommandIds.Clear();
+            for (var i = 0; i < _commandMarkers.Count; i++) _previousCommandIds.Add(_commandMarkers[i].InstanceId);
+            var commandCount = 0;
+            if (_upstream.ShareCommandPicksEnabled)
+            {
+                var c2CommandDiscoveryTiming = C2HitchDiagnostics.Begin(
+                    C2HitchPhase.CommandPickerDiscovery,
+                    markerCount: _markers.Count + _commandMarkers.Count);
+                var commandPickers = InstanceTracker.GetInstancesList<PickupPickerController>();
+                C2HitchDiagnostics.End(
+                    c2CommandDiscoveryTiming,
+                    markerCount: _markers.Count + _commandMarkers.Count,
+                    pickupCount: commandPickers.Count);
+                foreach (var picker in commandPickers)
+                {
+                    if (picker == null) continue;
+                    var instanceId = picker.GetInstanceID();
+                    var isCommand = _upstream.IsCommandCube(picker);
+                    if (!isCommand)
+                    {
+                        ReleaseCommandGate(instanceId, "classifier-false");
+                        if (_previousCommandIds.Contains(instanceId)) _commandRemovalReasons[instanceId] = "classifier-false";
+                        continue;
+                    }
+
+                    _seenCommandCandidateIds.Add(instanceId);
+                    var localPickedStates = _localPickedStateBuffer;
+                    var anyLocalPending = false;
+                    var allLocalStateResolved = true;
+                    for (var i = 0; i < localMasters.Length; i++)
+                    {
+                        if (!_upstream.TryHasCommandPicked(picker, localMasters[i], out var picked))
+                        {
+                            localPickedStates[i] = null;
+                            allLocalStateResolved = false;
+                            continue;
+                        }
+                        localPickedStates[i] = picked;
+                        if (ProjectionPolicy.ShowPersonalMarker(true, localStates[i], picked)) anyLocalPending = true;
+                    }
+
+                    var commandPresentation = LocalCommandPresentationPolicy.Evaluate(localPickedStates);
+                    ApplyLocalCommandPresentation(picker, commandPresentation);
+
+                    if (!_config.PersonalMarkersEnabled.Value)
+                    {
+                        if (_previousCommandIds.Contains(instanceId)) _commandRemovalReasons[instanceId] = "markers-disabled";
+                        continue;
+                    }
+
+                    if (!TryResolveCommandMarkerTarget(picker, out var worldPosition, out var invalidReason)
+                        || (hasSweepCameraPosition && !TryResolvePresentationDistance(sweepCameraPosition, worldPosition, out _, out invalidReason)))
+                    {
+                        _markerRegistry.Remove(PersonalMarkerKind.CommandPicker, instanceId);
+                        if (_previousCommandIds.Contains(instanceId)) LogCommandCleanup(instanceId, invalidReason);
+                        continue;
+                    }
+
+                    var exactPendingProof = anyLocalPending || allLocalStateResolved;
+                    var shouldTrack = commandCount < MarkerPresentationPolicy.MaxCommandMarkers
+                                      && MarkerPresentationPolicy.ShouldTrackCommandMarker(
+                                          _config.PersonalMarkersEnabled.Value,
+                                          _upstream.IsIndividualMode,
+                                          _upstream.ShareCommandPicksEnabled,
+                                          classifierIsCommand: true,
+                                          exactLocalStateResolved: exactPendingProof,
+                                          anyLocalPending: anyLocalPending);
+                    if (!shouldTrack)
+                    {
+                        if (_previousCommandIds.Contains(instanceId))
+                        {
+                            _commandRemovalReasons[instanceId] = allLocalStateResolved ? "local-completed" : "local-state-unresolved";
+                        }
+                        continue;
+                    }
+
+                    var c2OptionTiming = C2HitchDiagnostics.Begin(
+                        C2HitchPhase.CommandOptionResolution,
+                        markerCount: _markers.Count + _commandMarkers.Count);
+                    CommandOptionResolutionDiagnostics.Begin(instanceId);
+                    MarkerRuntimeMetadata metadata;
+                    string optionSource;
+                    int resolvedOptionCount;
+                    bool sourceDisagreement;
+                    CommandShareabilityDecision shareability;
+                    var commandLifetime = MarkerLifetimeKind.Unknown;
+                    var exactLifetimeOptionCount = 0;
+                    var unresolvedLifetimeOptionCount = 0;
+                    try
+                    {
+                        _upstream.TryBuildCommandChoiceSnapshot(picker, out var commandOptions);
+                        metadata = ResolveCommandMarkerMetadata(
+                            commandOptions,
+                            markerLanguage,
+                            out optionSource,
+                            out resolvedOptionCount,
+                            out sourceDisagreement,
+                            out shareability);
+                        commandLifetime = commandOptions.Lifetime;
+                        exactLifetimeOptionCount = commandOptions.ExactNestedAvailableOptionCount;
+                        unresolvedLifetimeOptionCount = commandOptions.UnresolvedAvailableOptionCount;
+                    }
+                    finally
+                    {
+                        CommandOptionResolutionDiagnostics.Complete();
+                        C2HitchDiagnostics.End(
+                            c2OptionTiming,
+                            markerCount: _markers.Count + _commandMarkers.Count);
+                    }
+                    var label = MarkerPresentationPolicy.NormalizeLabel(metadata.Label, MarkerTextLocalization.FallbackCommandChoice(markerLanguage));
+                    if (commandLifetime == MarkerLifetimeKind.Unknown && _commandLifetimeUnknownLogged.Add(instanceId))
+                    {
+                        LogInfo("ISF_COMMAND_LIFETIME pickerInstanceId=" + instanceId.ToString(CultureInfo.InvariantCulture)
+                            + " lifetime=Unknown exactNestedAvailable=" + exactLifetimeOptionCount.ToString(CultureInfo.InvariantCulture)
+                            + " unresolvedAvailable=" + unresolvedLifetimeOptionCount.ToString(CultureInfo.InvariantCulture)
+                            + " assertion=none");
+                    }
+                    if (sourceDisagreement && _commandOptionDisagreementLogged.Add(instanceId))
+                    {
+                        LogInfo("ISF_COMMAND_OPTION_SOURCE_DISAGREEMENT pickerInstanceId=" + instanceId.ToString(CultureInfo.InvariantCulture)
+                            + " nestedWins=True optionSource=" + optionSource);
+                    }
+
+                    if (!MarkerLifetimePolicy.IsMarkerEligible(commandLifetime, _config.ShareTemporaryItems.Value))
+                    {
+                        _commandShareabilityDiagnosticState[instanceId] = "temporary-sharing-disabled";
+                        if (_previousCommandIds.Contains(instanceId)) _commandRemovalReasons[instanceId] = "temporary-sharing-disabled";
+                        continue;
+                    }
+
+                    if (!shareability.MarkerEligible)
+                    {
+                        var diagnosticState = shareability.DiagnosticToken + ":" + shareability.FilterReason;
+                        if (!_commandShareabilityDiagnosticState.TryGetValue(instanceId, out var previousDiagnosticState)
+                            || !string.Equals(previousDiagnosticState, diagnosticState, StringComparison.Ordinal))
+                        {
+                            _commandShareabilityDiagnosticState[instanceId] = diagnosticState;
+                            LogInfo("ISF_COMMAND_MARKER filtered pickerInstanceId=" + instanceId.ToString(CultureInfo.InvariantCulture)
+                                + " optionSource=" + optionSource
+                                + " resolvedOptionCount=" + resolvedOptionCount.ToString(CultureInfo.InvariantCulture)
+                                + " class=" + metadata.ClassName
+                                + " label=" + label
+                                + " color=" + ColorEvidence(metadata.TextColor)
+                                + " shareability=" + shareability.DiagnosticToken
+                                + " reason=" + shareability.FilterReason);
+                        }
+                        if (_previousCommandIds.Contains(instanceId)) _commandRemovalReasons[instanceId] = shareability.FilterReason;
+                        continue;
+                    }
+
+                    _commandShareabilityDiagnosticState[instanceId] = shareability.DiagnosticToken + ":eligible";
+                    if (!_firstMarkerActivationTiming.Active)
+                    {
+                        _firstMarkerActivationTiming = C2HitchDiagnostics.Begin(
+                            C2HitchPhase.FirstMarkerActivationEndToEnd,
+                            markerCount: _markers.Count + _commandMarkers.Count);
+                    }
+                    var c2RegistryTiming = C2HitchDiagnostics.Begin(
+                        C2HitchPhase.CommandMarkerRegistryUpdate,
+                        markerCount: _markers.Count + _commandMarkers.Count);
+                    var transition = _markerRegistry.MarkPending(PersonalMarkerKind.CommandPicker, instanceId, label);
+                    C2HitchDiagnostics.End(
+                        c2RegistryTiming,
+                        markerCount: _markers.Count + _commandMarkers.Count + (transition == PersonalMarkerTransition.Added ? 1 : 0));
+                    if (transition == PersonalMarkerTransition.CapacityRejected)
+                    {
+                        _firstMarkerActivationTiming = default;
+                        continue;
+                    }
+                    _nextCommandMarkers.Add(new PersonalCommandMarker
+                    {
+                        InstanceId = instanceId,
+                        Picker = picker,
+                        Label = label,
+                        ItemSemanticKey = "COMMAND:" + instanceId.ToString(CultureInfo.InvariantCulture),
+                        ClassName = metadata.ClassName,
+                        Kind = metadata.Kind,
+                        TextColor = metadata.TextColor,
+                        Lifetime = commandLifetime,
+                    });
+                    commandCount++;
+                    if (transition == PersonalMarkerTransition.Added || transition == PersonalMarkerTransition.Updated)
+                    {
+                        LogInfo("ISF_COMMAND_MARKER pending pickerInstanceId=" + instanceId.ToString(CultureInfo.InvariantCulture)
+                            + " localPending=True providerHasState=" + _upstream.HasPickerProviderState(picker)
+                            + " discovery=InstanceTracker"
+                            + " optionSource=" + optionSource
+                            + " resolvedOptionCount=" + resolvedOptionCount.ToString(CultureInfo.InvariantCulture)
+                            + " class=" + metadata.ClassName
+                            + " label=" + label
+                            + " color=" + ColorEvidence(metadata.TextColor)
+                            + " style=" + MarkerPresentationPolicy.NativeHudStyleToken
+                            + " renderer=canvas-tmp-ui-graphic"
+                            + " fontSize=" + MarkerPresentationPolicy.BuildNativeHudFontSize(Screen.height).ToString(CultureInfo.InvariantCulture)
+                            + " shareability=" + shareability.DiagnosticToken
+                            + " exactClass=" + metadata.ExactClass
+                            + " lifetime=" + commandLifetime
+                            + " lifetimeExactNested=" + exactLifetimeOptionCount.ToString(CultureInfo.InvariantCulture)
+                            + " lifetimeUnresolved=" + unresolvedLifetimeOptionCount.ToString(CultureInfo.InvariantCulture));
+                    }
+                }
+            }
+
+            _staleInstanceIds.Clear();
+            foreach (var key in _commandGates.Keys)
+                if (!_seenCommandCandidateIds.Contains(key)) _staleInstanceIds.Add(key);
+            for (var i = 0; i < _staleInstanceIds.Count; i++)
+                ReleaseCommandGate(_staleInstanceIds[i], "picker-destroyed-stale-or-sharing-disabled");
+
+            _staleInstanceIds.Clear();
+            foreach (var key in _commandShareabilityDiagnosticState.Keys)
+                if (!_seenCommandCandidateIds.Contains(key)) _staleInstanceIds.Add(key);
+            for (var i = 0; i < _staleInstanceIds.Count; i++)
+                _commandShareabilityDiagnosticState.Remove(_staleInstanceIds[i]);
+            _commandLifetimeUnknownLogged.RemoveWhere(x => !_seenCommandCandidateIds.Contains(x));
+
+            var removed = _markerRegistry.EndSweep();
+            foreach (var descriptor in removed)
+            {
+                if (descriptor.Identity.Kind == PersonalMarkerKind.OrdinaryPickup)
+                {
+                    _ordinaryRenderLogged.Remove(descriptor.Identity.InstanceId);
+                    continue;
+                }
+
+                var id = descriptor.Identity.InstanceId;
+                var reason = _commandRemovalReasons.TryGetValue(id, out var exactReason) ? exactReason : "destroyed-or-untracked";
+                LogCommandCleanup(id, reason);
+            }
+
+            _markers.Clear();
+            _markers.AddRange(_nextOrdinaryMarkers);
+            _commandMarkers.Clear();
+            _commandMarkers.AddRange(_nextCommandMarkers);
+            }
+            finally
+            {
+                C2HitchDiagnostics.End(
+                    c2SweepTiming,
+                    markerCount: _markers.Count + _commandMarkers.Count,
+                    pickupCount: pickupControllers.Count);
+                C2HitchDiagnostics.End(
+                    c2PickupSweepTiming,
+                    markerCount: _markers.Count + _commandMarkers.Count,
+                    pickupCount: pickupControllers.Count);
+            }
+}
+
+        private void OnMarkerRendered(MarkerRenderDiagnostic diagnostic)
+        {
+            if (!_config.DiagnosticLogging.Value) return;
+            var identity = diagnostic.Input.Identity;
+            var placement = diagnostic.Placement;
+            var state = MarkerRuntimeHotPathPolicy.BuildHudDiagnosticState(
+                placement.Mode,
+                placement.Edge,
+                placement.LaneSlot,
+                placement.RailSlot,
+                placement.HudRelocated,
+                placement.MessageHudRelocated,
+                placement.CollisionRelocated,
+                diagnostic.UsedMeasurementFallback,
+                diagnostic.LabelPreferredWidth,
+                diagnostic.Footprint.Width);
+            var projectionStateChanged = !_markerProjectionDiagnosticState.TryGetValue(diagnostic.ClusterKey, out var previousState)
+                || !previousState.Equals(state);
+            if (projectionStateChanged) _markerProjectionDiagnosticState[diagnostic.ClusterKey] = state;
+
+            var firstOrdinaryRender = identity.Kind == PersonalMarkerKind.OrdinaryPickup
+                && _ordinaryRenderLogged.Add(identity.InstanceId);
+            if (!projectionStateChanged && !firstOrdinaryRender) return;
+
+            var mode = placement.Mode == MarkerHudMode.OnScreenWorldAnchor ? "onscreen" : "edge";
+            var edge = FormatEdge(placement.Edge);
+            if (projectionStateChanged)
+            {
+                var rect = placement.FinalRect;
+                LogInfo("ISF_MARKER_HUD clusterKey=" + diagnostic.ClusterKey.ToString(CultureInfo.InvariantCulture)
+                    + " fingerprint=" + diagnostic.MemberFingerprint
+                    + " total=" + diagnostic.ClusterTotal.ToString(CultureInfo.InvariantCulture)
+                    + " representative=" + identity
+                    + " mode=" + mode
+                    + " semantic=" + diagnostic.SemanticText.Replace("\n", " | ")
+                    + " edge=" + edge
+                    + " stackSlot=" + placement.StackSlot.ToString(CultureInfo.InvariantCulture)
+                    + " laneSlot=" + placement.LaneSlot.ToString(CultureInfo.InvariantCulture)
+                    + " railSlot=" + placement.RailSlot.ToString(CultureInfo.InvariantCulture)
+                    + " rect=" + FormatMarkerRect(rect)
+                    + " hudRelocated=" + placement.HudRelocated
+                    + " messageHudRelocated=" + placement.MessageHudRelocated
+                    + " collisionRelocated=" + placement.CollisionRelocated
+                    + " anchorDisplacement=" + MarkerHudNavigationPolicy.OnScreenAnchorDisplacement(diagnostic.SourceProjection, placement).ToString("F1", CultureInfo.InvariantCulture)
+                    + " anchorDisplacementBound=" + MarkerHudNavigationPolicy.GetMaxOnScreenAnchorDisplacement(diagnostic.Footprint, Screen.width, Screen.height).ToString("F1", CultureInfo.InvariantCulture)
+                    + " labelPreferredWidth=" + diagnostic.LabelPreferredWidth.ToString("F1", CultureInfo.InvariantCulture)
+                    + " footprintWidth=" + diagnostic.Footprint.Width.ToString("F1", CultureInfo.InvariantCulture)
+                    + " measurementFallback=" + diagnostic.UsedMeasurementFallback
+                    + " semanticModel=world-space-cluster"
+                    + " renderer=canvas-tmp-ui-graphic");
+            }
+
+            if (firstOrdinaryRender)
+            {
+                LogInfo("ISF_MARKER_RENDER ordinary pickupInstanceId=" + identity.InstanceId.ToString(CultureInfo.InvariantCulture)
+                    + " clusterKey=" + diagnostic.ClusterKey.ToString(CultureInfo.InvariantCulture)
+                    + " fingerprint=" + diagnostic.MemberFingerprint
+                    + " total=" + diagnostic.ClusterTotal.ToString(CultureInfo.InvariantCulture)
+                    + " indicatorSource=" + MarkerPresentationPolicy.IndicatorAssetSourceToken
+                    + " style=" + MarkerPresentationPolicy.NativeHudStyleToken
+                    + " renderer=canvas-tmp-ui-graphic"
+                    + " mode=" + mode
+                    + " edge=" + edge);
+            }
+        }
+
+        private static string FormatEdge(MarkerHudEdge edge)
+        {
+            switch (edge)
+            {
+                case MarkerHudEdge.Left: return "left";
+                case MarkerHudEdge.Right: return "right";
+                case MarkerHudEdge.Top: return "top";
+                case MarkerHudEdge.Bottom: return "bottom";
+                default: return "none";
+            }
+        }
+
+        private static bool SameDiagnosticRect(MarkerHudRect left, MarkerHudRect right)
+            => Math.Abs(left.Left - right.Left) < 0.5f
+               && Math.Abs(left.Right - right.Right) < 0.5f
+               && Math.Abs(left.Bottom - right.Bottom) < 0.5f
+               && Math.Abs(left.Top - right.Top) < 0.5f;
+
+        private static string FormatMarkerRect(MarkerHudRect rect)
+            => rect.Left.ToString("F1", CultureInfo.InvariantCulture) + ","
+               + rect.Bottom.ToString("F1", CultureInfo.InvariantCulture) + ","
+               + rect.Right.ToString("F1", CultureInfo.InvariantCulture) + ","
+               + rect.Top.ToString("F1", CultureInfo.InvariantCulture);
+
+        private static bool ShouldShowMarker(ParticipantState[] localStates, bool[] collected)
+        {
+            for (var i = 0; i < localStates.Length; i++)
+            {
+                if (ProjectionPolicy.ShowPersonalMarker(true, localStates[i], collected[i])) return true;
+            }
+            return false;
+        }
+
+        private CharacterMaster[] GetLocalMastersSnapshot()
+        {
+            if (_localMastersFrame == Time.frameCount) return _cachedLocalMasters;
+            _localMastersFrame = Time.frameCount;
+            LocalParticipantResolver.FillLocalMasters(_localMasterBuffer);
+            if (_cachedLocalMasters.Length != _localMasterBuffer.Count)
+                _cachedLocalMasters = new CharacterMaster[_localMasterBuffer.Count];
+            for (var i = 0; i < _localMasterBuffer.Count; i++)
+                _cachedLocalMasters[i] = _localMasterBuffer[i];
+            return _cachedLocalMasters;
+        }
+
+        private void EnsureParticipantBuffers(int count)
+        {
+            if (_localStateBuffer.Length != count) _localStateBuffer = new ParticipantState[count];
+            if (_collectedBuffer.Length != count) _collectedBuffer = new bool[count];
+            if (_localPickedStateBuffer.Length != count) _localPickedStateBuffer = new bool?[count];
+        }
+
+        private void NormalizeUpstreamForGate(GenericPickupController pickup)
+        {
+            try
+            {
+                _upstreamNormalizationDepth++;
+                _upstream.NormalizeUpstreamVisualSubtree(pickup);
+            }
+            finally
+            {
+                _upstreamNormalizationDepth--;
+            }
+        }
+
+        private void ReleaseGate(int instanceId)
+        {
+            if (!_gates.TryGetValue(instanceId, out var gate)) return;
+            if (gate != null)
+            {
+                gate.Restore();
+                UnityEngine.Object.Destroy(gate);
+            }
+            _gates.Remove(instanceId);
+        }
+
+        private void ApplyLocalCommandPresentation(PickupPickerController picker, LocalCommandPresentationDecision decision)
+        {
+            var instanceId = picker.GetInstanceID();
+            if (decision.SuppressWorldPresentation)
+            {
+                if (!_commandGates.TryGetValue(instanceId, out var gate) || gate == null)
+                {
+                    gate = picker.gameObject.GetComponent<LocalCommandPresentationGate>() ?? picker.gameObject.AddComponent<LocalCommandPresentationGate>();
+                    _commandGates[instanceId] = gate;
+                }
+                gate.ApplyHidden();
+                LogLocalCommandGateTransition(instanceId, true, "all-local-completed");
+                return;
+            }
+
+            var reason = !decision.AllLocalStateResolved
+                ? "local-state-unresolved"
+                : decision.AnyLocalPending ? "local-participant-pending" : "not-all-local-completed";
+            ReleaseCommandGate(instanceId, reason);
+        }
+
+        private void ReleaseCommandGate(int instanceId, string reason)
+        {
+            var hadGate = _commandGates.TryGetValue(instanceId, out var gate);
+            if (hadGate)
+            {
+                if (gate != null)
+                {
+                    gate.Restore();
+                    UnityEngine.Object.Destroy(gate);
+                }
+                _commandGates.Remove(instanceId);
+            }
+
+            var hadSuppressedDiagnostic = _localCommandGateDiagnosticState.TryGetValue(instanceId, out var previous) && previous;
+            if (hadGate || hadSuppressedDiagnostic) LogLocalCommandGateTransition(instanceId, false, reason);
+        }
+
+        private void LogLocalCommandGateTransition(int instanceId, bool visualSuppressed, string reason)
+        {
+            if (!_config.DiagnosticLogging.Value) return;
+            if (_localCommandGateDiagnosticState.TryGetValue(instanceId, out var previous) && previous == visualSuppressed) return;
+            _localCommandGateDiagnosticState[instanceId] = visualSuppressed;
+            LogInfo("ISF_C20_LOCAL_COMMAND_GATE picker=" + instanceId.ToString(CultureInfo.InvariantCulture)
+                + " allLocalCompleted=" + visualSuppressed.ToString().ToLowerInvariant()
+                + " visualSuppressed=" + visualSuppressed.ToString().ToLowerInvariant()
+                + " reason=" + reason);
+        }
+
+        private void LogLocalVisualGateTransition(GenericPickupController pickup, int collectedCount, int localCount, bool visualSuppressed)
+        {
+            if (!_config.DiagnosticLogging.Value || pickup == null) return;
+            var fingerprint = collectedCount.ToString(CultureInfo.InvariantCulture) + "/"
+                + localCount.ToString(CultureInfo.InvariantCulture) + ":" + visualSuppressed;
+            var instanceId = pickup.GetInstanceID();
+            if (_localPickupVisualDiagnosticState.TryGetValue(instanceId, out var previous)
+                && string.Equals(previous, fingerprint, StringComparison.Ordinal)) return;
+            _localPickupVisualDiagnosticState[instanceId] = fingerprint;
+            LogInfo("ISF_C20_LOCAL_PICKUP_GATE pickup=" + instanceId.ToString(CultureInfo.InvariantCulture)
+                + " localMaster=process localCollected=" + collectedCount.ToString(CultureInfo.InvariantCulture)
+                + "/" + localCount.ToString(CultureInfo.InvariantCulture)
+                + " visualSuppressed=" + visualSuppressed.ToString().ToLowerInvariant()
+                + " interactionSuppressed=participant-specific"
+                + " action=visual-state reason=" + (visualSuppressed ? "all-local-collected" : "local-participant-still-needs-pickup"));
+        }
+
+        private void LogLocalInteractionGateTransition(GenericPickupController pickup, CharacterMaster master, bool collected, bool interactionSuppressed)
+        {
+            if (!_config.DiagnosticLogging.Value || pickup == null || master == null) return;
+            var pickupId = pickup.GetInstanceID();
+            var masterId = master.GetInstanceID();
+            var key = ((long)(uint)pickupId << 32) | (uint)masterId;
+            if (_localPickupInteractionDiagnosticState.TryGetValue(key, out var previous) && previous == interactionSuppressed) return;
+            _localPickupInteractionDiagnosticState[key] = interactionSuppressed;
+            LogInfo("ISF_C20_LOCAL_PICKUP_GATE pickup=" + pickupId.ToString(CultureInfo.InvariantCulture)
+                + " localMaster=masterNetId=" + master.netId.Value.ToString(CultureInfo.InvariantCulture)
+                + " localCollected=" + collected.ToString().ToLowerInvariant()
+                + " visualSuppressed=" + _gates.ContainsKey(pickupId).ToString().ToLowerInvariant()
+                + " interactionSuppressed=" + interactionSuppressed.ToString().ToLowerInvariant()
+                + " action=interactability-state reason=" + (interactionSuppressed ? "local-collector-already-collected" : "local-participant-not-collected"));
+        }
+
+        private static bool TryGetFiniteCameraPosition(Camera camera, out Vector3 cameraPosition)
+        {
+            cameraPosition = default;
+            try
+            {
+                cameraPosition = camera.transform.position;
+                return MarkerPresentationPolicy.AreCoordinatesFinite(cameraPosition.x, cameraPosition.y, cameraPosition.z);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryResolveOrdinaryMarkerTarget(GenericPickupController pickup, out Vector3 worldPosition, out string invalidReason)
+        {
+            worldPosition = default;
+            invalidReason = string.Empty;
+            if (pickup == null)
+            {
+                invalidReason = "destroyed-or-missing";
+                return false;
+            }
+
+            try
+            {
+                if (pickup.gameObject == null || !pickup.gameObject.activeInHierarchy)
+                {
+                    invalidReason = "inactive-or-removed";
+                    return false;
+                }
+                if (PickupCatalog.GetPickupDef(pickup.pickup.pickupIndex) == null)
+                {
+                    invalidReason = "pickup-def-unresolved";
+                    return false;
+                }
+                worldPosition = pickup.transform.position;
+                invalidReason = MarkerPresentationPolicy.ValidateWorldPosition(worldPosition.x, worldPosition.y, worldPosition.z);
+                return string.IsNullOrEmpty(invalidReason);
+            }
+            catch
+            {
+                invalidReason = "target-resolution-failed";
+                return false;
+            }
+        }
+
+        private static bool TryResolveCommandMarkerTarget(PickupPickerController picker, out Vector3 worldPosition, out string invalidReason)
+        {
+            worldPosition = default;
+            invalidReason = string.Empty;
+            if (picker == null)
+            {
+                invalidReason = "destroyed-or-missing";
+                return false;
+            }
+
+            try
+            {
+                if (picker.gameObject == null || !picker.gameObject.activeInHierarchy)
+                {
+                    invalidReason = "inactive-or-removed";
+                    return false;
+                }
+                worldPosition = picker.transform.position;
+                invalidReason = MarkerPresentationPolicy.ValidateWorldPosition(worldPosition.x, worldPosition.y, worldPosition.z);
+                return string.IsNullOrEmpty(invalidReason);
+            }
+            catch
+            {
+                invalidReason = "target-resolution-failed";
+                return false;
+            }
+        }
+
+        private static bool TryResolvePresentationDistance(Vector3 cameraPosition, Vector3 worldPosition, out int roundedDistanceMeters, out string invalidReason)
+        {
+            roundedDistanceMeters = 0;
+            invalidReason = string.Empty;
+            var distance = Vector3.Distance(cameraPosition, worldPosition);
+            invalidReason = MarkerPresentationPolicy.ValidatePresentationDistance(distance);
+            if (!string.IsNullOrEmpty(invalidReason)) return false;
+            roundedDistanceMeters = Mathf.Max(0, Mathf.RoundToInt(distance));
+            return true;
+        }
+
+        private void RemoveOrdinaryMarkerNow(PersonalPickupMarker marker, string reason)
+        {
+            _markers.Remove(marker);
+            _markerRegistry.Remove(PersonalMarkerKind.OrdinaryPickup, marker.InstanceId);
+            _ordinaryRenderLogged.Remove(marker.InstanceId);
+            ReleaseGate(marker.InstanceId);
+            LogOrdinaryCleanup(marker.InstanceId, reason);
+        }
+
+        private void RemoveCommandMarkerNow(PersonalCommandMarker marker, string reason)
+        {
+            _commandMarkers.Remove(marker);
+            _markerRegistry.Remove(PersonalMarkerKind.CommandPicker, marker.InstanceId);
+            _commandShareabilityDiagnosticState.Remove(marker.InstanceId);
+            LogCommandCleanup(marker.InstanceId, reason);
+        }
+
+        private void LogOrdinaryCleanup(int instanceId, string reason)
+        {
+            if (!_config.DiagnosticLogging.Value) return;
+            LogInfo("ISF_MARKER_CLEANUP ordinary pickupInstanceId=" + instanceId.ToString(CultureInfo.InvariantCulture) + " reason=" + reason);
+        }
+
+
+        private static Sprite? ResolvePickupIcon(GenericPickupController pickup)
+        {
+            try
+            {
+                var def = PickupCatalog.GetPickupDef(pickup.pickup.pickupIndex);
+                return def != null ? def.iconSprite : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string PickupSemanticKey(GenericPickupController pickup)
+        {
+            try
+            {
+                var pickupIndex = pickup.pickup.pickupIndex;
+                var def = PickupCatalog.GetPickupDef(pickupIndex);
+                if (def != null && !string.IsNullOrWhiteSpace(def.nameToken)) return "PICKUP:" + def.nameToken;
+                return "PICKUP_INDEX:" + pickupIndex.ToString();
+            }
+            catch
+            {
+                return "PICKUP_INSTANCE:" + pickup.GetInstanceID().ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        private static string PickupLabel(GenericPickupController pickup, MarkerLanguage language)
+        {
+            try
+            {
+                var def = PickupCatalog.GetPickupDef(pickup.pickup.pickupIndex);
+                if (def != null && !string.IsNullOrEmpty(def.nameToken))
+                {
+                    var localized = Language.GetString(def.nameToken);
+                    if (!string.IsNullOrWhiteSpace(localized) && !string.Equals(localized, def.nameToken, StringComparison.Ordinal)) return localized;
+                }
+            }
+            catch { }
+            return MarkerTextLocalization.FallbackSharedPickup(language);
+        }
+
+        private MarkerRuntimeMetadata ResolveCommandMarkerMetadata(
+            UpstreamBridge.CommandChoiceSnapshot snapshot,
+            MarkerLanguage language,
+            out string optionSource,
+            out int resolvedOptionCount,
+            out bool sourceDisagreement,
+            out CommandShareabilityDecision shareability)
+        {
+            var profileActive = CommandOptionResolutionDiagnostics.CaptureActive;
+            var profileMetadataStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            var profilePickupMetadataTicks = 0L;
+            var profileUpstreamShareabilityTicks = 0L;
+            var profilePresentationFinalizationTicks = 0L;
+            var profileUpstreamShareabilityCalls = 0;
+
+            optionSource = snapshot.OptionSource;
+            resolvedOptionCount = 0;
+            sourceDisagreement = snapshot.SourceDisagreement;
+            var profileInitialPresentationStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            shareability = CommandShareabilityPolicy.Evaluate(Array.Empty<bool?>());
+            if (profileActive) profilePresentationFinalizationTicks += System.Diagnostics.Stopwatch.GetTimestamp() - profileInitialPresentationStarted;
+            var pickupIndexes = snapshot.PickupIndexes;
+            var exactSource = snapshot.ExactSource;
+            if (!snapshot.HasResolvedPickupIndexes)
+            {
+                var profilePresentationStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                var fallback = MarkerClassPolicy.ResolveCommandClassForReadablePresentation(Array.Empty<MarkerClassKind>(), language);
+                var fallbackMetadata = new MarkerRuntimeMetadata(fallback.Kind, MarkerClassPolicy.DiagnosticClassName(fallback.Kind), fallback.Label, Color.white, false);
+                if (profileActive)
+                {
+                    var profileCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    profilePresentationFinalizationTicks += profileCompleted - profilePresentationStarted;
+                    CommandOptionResolutionDiagnostics.RecordMetadata(
+                        profileCompleted - profileMetadataStarted,
+                        profilePickupMetadataTicks,
+                        profileUpstreamShareabilityTicks,
+                        profilePresentationFinalizationTicks,
+                        profileUpstreamShareabilityCalls);
+                }
+                return fallbackMetadata;
+            }
+
+            resolvedOptionCount = pickupIndexes.Length;
+            var resolved = new List<MarkerRuntimeMetadata>(pickupIndexes.Length);
+            var upstreamShareability = new List<bool?>(pickupIndexes.Length);
+            foreach (var pickupIndex in pickupIndexes)
+            {
+                var profilePickupMetadataStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                var def = PickupCatalog.GetPickupDef(pickupIndex);
+                if (def == null)
+                {
+                    resolved.Add(UnknownPickupMetadata());
+                    upstreamShareability.Add(null);
+                    if (profileActive) profilePickupMetadataTicks += System.Diagnostics.Stopwatch.GetTimestamp() - profilePickupMetadataStarted;
+                    continue;
+                }
+
+                resolved.Add(ResolvePickupMarkerMetadata(def));
+                if (profileActive) profilePickupMetadataTicks += System.Diagnostics.Stopwatch.GetTimestamp() - profilePickupMetadataStarted;
+
+                var profileShareabilityStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                upstreamShareability.Add(_upstream.TryIsShareable(def, out var isShareable) ? isShareable : (bool?)null);
+                if (profileActive)
+                {
+                    profileUpstreamShareabilityTicks += System.Diagnostics.Stopwatch.GetTimestamp() - profileShareabilityStarted;
+                    profileUpstreamShareabilityCalls++;
+                }
+            }
+
+            var profileFinalizationStarted = profileActive ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            shareability = exactSource
+                ? CommandShareabilityPolicy.Evaluate(upstreamShareability)
+                : CommandShareabilityPolicy.Evaluate(Array.Empty<bool?>());
+            var classPresentation = MarkerClassPolicy.ResolveCommandClassForReadablePresentation(resolved.Select(x => x.Kind), language);
+            if (!classPresentation.ExactClass)
+            {
+                var fallbackColor = classPresentation.Kind == MarkerClassKind.Other && resolved.Count > 0
+                    ? resolved[0].TextColor
+                    : Color.white;
+                var fallbackMetadata = new MarkerRuntimeMetadata(classPresentation.Kind, MarkerClassPolicy.DiagnosticClassName(classPresentation.Kind), classPresentation.Label, fallbackColor, false);
+                if (profileActive)
+                {
+                    var profileCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                    profilePresentationFinalizationTicks += profileCompleted - profileFinalizationStarted;
+                    CommandOptionResolutionDiagnostics.RecordMetadata(
+                        profileCompleted - profileMetadataStarted,
+                        profilePickupMetadataTicks,
+                        profileUpstreamShareabilityTicks,
+                        profilePresentationFinalizationTicks,
+                        profileUpstreamShareabilityCalls);
+                }
+                return fallbackMetadata;
+            }
+
+            var matching = resolved.Where(x => x.Kind == classPresentation.Kind).ToArray();
+            var color = matching.Length > 0 ? matching[0].TextColor : Color.white;
+            var metadata = new MarkerRuntimeMetadata(
+                classPresentation.Kind,
+                MarkerClassPolicy.DiagnosticClassName(classPresentation.Kind),
+                classPresentation.Label,
+                color,
+                exactSource);
+            if (profileActive)
+            {
+                var profileCompleted = System.Diagnostics.Stopwatch.GetTimestamp();
+                profilePresentationFinalizationTicks += profileCompleted - profileFinalizationStarted;
+                CommandOptionResolutionDiagnostics.RecordMetadata(
+                    profileCompleted - profileMetadataStarted,
+                    profilePickupMetadataTicks,
+                    profileUpstreamShareabilityTicks,
+                    profilePresentationFinalizationTicks,
+                    profileUpstreamShareabilityCalls);
+            }
+            return metadata;
+        }
+
+        private static MarkerRuntimeMetadata ResolvePickupMarkerMetadata(PickupIndex pickupIndex)
+        {
+            try
+            {
+                var def = PickupCatalog.GetPickupDef(pickupIndex);
+                return def != null ? ResolvePickupMarkerMetadata(def) : UnknownPickupMetadata();
+            }
+            catch
+            {
+                return UnknownPickupMetadata();
+            }
+        }
+
+        private static MarkerRuntimeMetadata ResolvePickupMarkerMetadata(PickupDef def)
+        {
+            try
+            {
+                var isEquipment = def.equipmentIndex != EquipmentIndex.None;
+                var lunarEquipment = false;
+                if (isEquipment)
+                {
+                    var equipmentDef = EquipmentCatalog.GetEquipmentDef(def.equipmentIndex);
+                    lunarEquipment = equipmentDef != null && equipmentDef.isLunar;
+                }
+
+                var kind = MarkerClassPolicy.Classify(def.itemTier.ToString(), isEquipment, lunarEquipment);
+                return new MarkerRuntimeMetadata(
+                    kind,
+                    MarkerClassPolicy.DiagnosticClassName(kind),
+                    string.Empty,
+                    SanitizeMarkerColor(def.baseColor),
+                    kind != MarkerClassKind.Unknown);
+            }
+            catch
+            {
+                return UnknownPickupMetadata();
+            }
+        }
+
+        private static MarkerRuntimeMetadata UnknownPickupMetadata()
+            => new MarkerRuntimeMetadata(MarkerClassKind.Unknown, MarkerClassPolicy.DiagnosticClassName(MarkerClassKind.Unknown), string.Empty, Color.white, false);
+
+        private static Color SanitizeMarkerColor(Color color)
+        {
+            if (float.IsNaN(color.r) || float.IsInfinity(color.r)
+                || float.IsNaN(color.g) || float.IsInfinity(color.g)
+                || float.IsNaN(color.b) || float.IsInfinity(color.b)
+                || color.a <= 0.01f) return Color.white;
+            color.a = 1f;
+            return color;
+        }
+
+        private static string ColorEvidence(Color color)
+            => "#" + ColorUtility.ToHtmlStringRGB(SanitizeMarkerColor(color));
+
+        private static MarkerLanguage CurrentMarkerLanguage()
+        {
+            try { return MarkerTextLocalization.ResolveLanguage(Language.currentLanguageName); }
+            catch { return MarkerLanguage.English; }
+        }
+
+        private void LogCommandCleanup(int instanceId, string reason)
+        {
+            if (!_config.DiagnosticLogging.Value) return;
+            LogInfo("ISF_COMMAND_MARKER cleanup pickerInstanceId=" + instanceId.ToString(CultureInfo.InvariantCulture) + " reason=" + reason);
+        }
+
+        private Camera? GetPresentationCamera()
+        {
+            var now = Time.unscaledTime;
+            if (_presentationCamera != null
+                && _presentationCamera.gameObject != null
+                && _presentationCamera.gameObject.activeInHierarchy
+                && now < _nextPresentationCameraRefresh)
+                return _presentationCamera;
+
+            _nextPresentationCameraRefresh = now + 2.0f;
+            try { _presentationCamera = Camera.main; }
+            catch { _presentationCamera = null; }
+            return _presentationCamera;
+        }
+
+        private void MaybeEmitPerformanceSummary(int markerCount)
+        {
+            if (!_config.DiagnosticLogging.Value) return;
+            var now = Time.unscaledTime;
+            if (now < _nextPerformanceSummary) return;
+            _nextPerformanceSummary = now + 5f;
+            EmitPerformanceSummary("periodic", markerCount, force: false);
+        }
+
+        private void EmitPerformanceSummary(string reason, int markerCount, bool force)
+        {
+            if (!_config.DiagnosticLogging.Value && !force) return;
+            var snapshot = _performance.Snapshot();
+            _log.LogInfo("[ItemShareFix] ISF_MARKER_PERF_SUMMARY reason=" + reason
+                + " markers=" + markerCount.ToString(CultureInfo.InvariantCulture)
+                + " updates=" + snapshot.UnityUpdateCalls.ToString(CultureInfo.InvariantCulture)
+                + " renderFrames=" + snapshot.RenderFrameCalls.ToString(CultureInfo.InvariantCulture)
+                + " fullSolves=" + snapshot.FullPlacementSolves.ToString(CultureInfo.InvariantCulture)
+                + " singleFast=" + snapshot.SingleMarkerFastPathCalls.ToString(CultureInfo.InvariantCulture)
+                + " globalHudDiscovery=" + snapshot.GlobalHudDiscoveries.ToString(CultureInfo.InvariantCulture)
+                + " tmpMeasures=" + snapshot.TmpPreferredMeasurements.ToString(CultureInfo.InvariantCulture)
+                + " uiWrites=" + snapshot.UiLayoutWrites.ToString(CultureInfo.InvariantCulture)
+                + " diagnostics=" + snapshot.DiagnosticRecords.ToString(CultureInfo.InvariantCulture)
+                + " heavyMsTotal=" + snapshot.HeavySolveMilliseconds.ToString("F3", CultureInfo.InvariantCulture)
+                + " heavyMsMax=" + snapshot.MaxHeavySolveMilliseconds.ToString("F3", CultureInfo.InvariantCulture));
+        }
+
+        private void LogInfo(string message)
+        {
+            if (!_config.DiagnosticLogging.Value) return;
+            _performance.RecordDiagnosticRecord();
+            _log.LogInfo("[ItemShareFix] " + message);
+        }
+
+        private static int CurrentStageToken()
+        {
+            var run = Run.instance;
+            if (run == null) return -1;
+            var value = ParticipantIdentityResolver.GetMember(run, "stageClearCount");
+            try { return value != null ? Convert.ToInt32(value, CultureInfo.InvariantCulture) : 0; }
+            catch { return 0; }
+        }
+    }
+}

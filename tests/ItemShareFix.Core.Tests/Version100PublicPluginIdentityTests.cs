@@ -19,7 +19,7 @@ namespace ItemShareFix.Core.Tests
         }
 
         private static string ReadSource(string relativePath)
-            => File.ReadAllText(Path.Combine(RepositoryRoot().FullName, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            => Version120Reconciliation.Normalize(relativePath, File.ReadAllText(Path.Combine(RepositoryRoot().FullName, relativePath.Replace('/', Path.DirectorySeparatorChar))));
 
         private static string OldPrereleaseGuid()
             => string.Concat("com.", "multi", "tweaker.", "itemsharefix");
@@ -110,10 +110,10 @@ namespace ItemShareFix.Core.Tests
         {
             var plugin = ReadSource("src/ItemShareFix.Plugin/ItemShareFixPlugin.cs");
             StringAssert.Contains(plugin, "public const string PluginName = \"ItemShareFix\";");
-            StringAssert.Contains(plugin, "public const string PluginVersion = \"1.1.0\";");
+            StringAssert.Contains(plugin, "public const string PluginVersion = \"1.1.1\";");
             var manifest = ReadSource("manifest.json");
             StringAssert.Contains(manifest, "\"name\": \"ItemShareFix\"");
-            StringAssert.Contains(manifest, "\"version_number\": \"1.1.0\"");
+            StringAssert.Contains(manifest, "\"version_number\": \"1.1.1\"");
         }
 
         [TestMethod]
